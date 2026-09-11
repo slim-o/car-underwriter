@@ -1,0 +1,6 @@
+openai
+pydantic
+pillow
+python-dotenv
+requests
+playwright

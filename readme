@@ -1,0 +1,137 @@
+# Car Underwriter (local prototype)
+
+This is a local, single-vehicle underwriting prototype:
+- Captures Copart listing evidence (supervised browser).
+- Downloads gallery photos into the case `photos/` folder when possible.
+- Optionally queries eBay for parts candidates (requires your own approved credentials).
+- Runs an AI-assisted inspection + provisional budget + bid ceiling calculation.
+- Saves an underwriting report (markdown + JSON).
+
+No automatic bidding is performed or approved by this tool.
+
+## 0) Prerequisites
+
+- Windows + Python 3.11+ (`py -3`)
+- A working Copart UK login in a normal browser
+- Optional: eBay production credentials (Browse API) if you want live parts searches
+
+## 1) One-time setup
+
+Create and activate a venv, then install dependencies:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+Set your environment in `.env`:
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL` (defaults to `gpt-4.1`)
+- Optional: `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`
+
+Sanity check the financial engine:
+
+```powershell
+py -3 finance.py
+```
+
+## 2) Underwrite a single Copart lot (end-to-end)
+
+Pick a lot URL:
+
+```text
+https://www.copart.co.uk/lot/<LOTNUMBER>
+```
+
+### Option A (recommended): drive an existing browser session (CDP)
+
+This reuses your already-logged-in browser session, which helps with Imperva checks.
+
+1) Close all Chrome windows.
+2) Start Chrome with a CDP port:
+
+```powershell
+start chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\Temp\copart-debug-profile"
+```
+
+3) In that Chrome window: log in to Copart, pass any security check, then open the lot page.
+4) Run capture:
+
+```powershell
+python underwriter.py capture "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>" --cdp http://127.0.0.1:9222
+```
+
+If the photos were not downloaded, run:
+
+```powershell
+python underwriter.py collect-photos --case "cases/<LOTNUMBER>" --cdp http://127.0.0.1:9222
+```
+
+### Option B: supervised capture with a fresh automated browser
+
+```powershell
+python underwriter.py capture "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>" --browser chrome
+```
+
+If you get stuck on an Imperva “Additional security check is required” page:
+- Complete the check in the opened browser window, then press Enter again in the terminal.
+- Ad/tracker blockers (extensions or system-wide) can prevent the checkbox from rendering.
+
+### Option C (fallback): manual capture
+
+Use this if automation can’t render the gallery/challenge reliably.
+
+```powershell
+python underwriter.py capture-manual "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>"
+```
+
+Then:
+- Paste the full lot details text into `cases/<LOTNUMBER>/listing.txt`
+- Put the original vehicle images into `cases/<LOTNUMBER>/photos/`
+- Continue with the settings + analysis steps below
+
+## 3) Fill the evidence-backed settings (required before analysis)
+
+Open `cases/<LOTNUMBER>/settings.json` and set these from evidence (not guesses):
+
+- Some fields are prefilled from `listing.txt` when detectable (e.g. `hammer_vat_rate=0` when VAT is stated as not added, and WBAC registration/mileage if unmasked).
+- `transport_including_vat`: your real delivery quote (GBP)
+- `hammer_vat_rate`: `0` or `0.20` based on the listing VAT status
+- `expected_gallery_images`: should match the actual number of vehicle photos
+- `photos_complete_confirmed`: set `true` only after you confirm completeness/relevance
+- `ulez`: `YES` / `NO` / `UNKNOWN`
+- `ulez_evidence`: what checker you used + timestamp
+- `wbac.*`: your evidenced WBAC “declared Cat N” exit value
+  - If you have a screenshot for audit, put it inside the case folder and set `wbac.evidence_file` to that filename (optional).
+
+### Optional: capture a WBAC valuation screenshot + extract the £ value
+
+If you want the tool to capture your on-screen WBAC valuation (from your own browser session), use:
+
+```powershell
+python underwriter.py capture-wbac --case "cases/<LOTNUMBER>" --cdp http://127.0.0.1:9222
+```
+
+This saves `wbac_capture.json` + a screenshot file in the case folder, and best-effort extracts a candidate `wbac.value`.
+You must still review/confirm Cat N declaration and repaired-condition basis in `settings.json`.
+
+## 4) Run the underwriting analysis
+
+This will send `listing.txt` and the `photos/` images to the configured AI API (costs money).
+
+```powershell
+python underwriter.py analyse --case "cases/<LOTNUMBER>" --consent-ai
+```
+
+## 5) Review outputs
+
+Look in `cases/<LOTNUMBER>/` for:
+- `inspection.json` (vehicle extraction + photo findings)
+- `parts.json` (eBay candidates or explicit credential/API errors)
+- `budget.json` (low/base/adverse provisional allowances)
+- `report.md` (human-readable underwriting summary)
+- `report.json` (full evidence-backed record)
+
+If `report.md` says “BLOCKED pending evidence”, fix the missing items listed under “Missing evidence” and re-run `analyse`.
