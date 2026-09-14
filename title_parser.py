@@ -1,178 +1,37 @@
+import json
 import re
 
-AUTOTRADER_MAKES = [
-    "Abarth",
-    "AC",
-    "AION",
-    "Aixam",
-    "AK",
-    "Alfa Romeo",
-    "Allard",
-    "Alpine",
-    "Ariel",
-    "Asia",
-    "Aston Martin",
-    "Audi",
-    "Austin",
-    "BAC",
-    "Beauford",
-    "Bentley",
-    "BMW",
-    "Bristol",
-    "Bugatti",
-    "Buick",
-    "BYD",
-    "Cadillac",
-    "Carbodies",
-    "Caterham",
-    "CFMOTO",
-    "Changan",
-    "Chery",
-    "Chesil",
-    "Chevrolet",
-    "Chrysler",
-    "Citroen",
-    "Corbin",
-    "Corvette",
-    "CUPRA",
-    "Dacia",
-    "Daewoo",
-    "Daihatsu",
-    "Daimler",
-    "Datsun",
-    "David Brown",
-    "Dax",
-    "De Tomaso",
-    "Dodge",
-    "DS AUTOMOBILES",
-    "Ferrari",
-    "Fiat",
-    "Fisker",
-    "Ford",
-    "Gardner Douglas",
-    "Geely",
-    "Genesis",
-    "GMC",
-    "Great Wall",
-    "GWM",
-    "Healey",
-    "Holden",
-    "Honda",
-    "Hummer",
-    "Hyundai",
-    "INEOS",
-    "Infiniti",
-    "Isuzu",
-    "Iveco",
-    "JAECOO",
-    "Jaguar",
-    "JBA",
-    "Jeep",
-    "Jensen",
-    "KGM",
-    "Kia",
-    "Koenigsegg",
-    "Lada",
-    "Lamborghini",
-    "Lancia",
-    "Land Rover",
-    "Leapmotor",
-    "Lepas",
-    "LEVC",
-    "Lexus",
-    "Leyland",
-    "Lincoln",
-    "Lister",
-    "London Taxis International",
-    "Lotus",
-    "Marlin",
-    "Maserati",
-    "MAXUS",
-    "Maybach",
-    "Mazda",
-    "McLaren",
-    "Mercedes-Benz",
-    "MEV",
-    "MG",
-    "Micro",
-    "Microcar",
-    "Mills Extreme Vehicles (MEV)",
-    "MINI",
-    "Mitsubishi",
-    "MK",
-    "MOKE",
-    "Morgan",
-    "Morris",
-    "Nardini",
-    "NG",
-    "Nissan",
-    "Noble",
-    "OMODA",
-    "Opel",
-    "Perodua",
-    "Peugeot",
-    "Pilgrim",
-    "Plymouth",
-    "Polestar",
-    "Pontiac",
-    "Porsche",
-    "Proton",
-    "Quantum",
-    "Ram",
-    "Reliant",
-    "Renault",
-    "Rimac",
-    "Rivian",
-    "Robin Hood",
-    "Rolls-Royce",
-    "Rover",
-    "Saab",
-    "SEAT",
-    "Shelby",
-    "Skoda",
-    "Skywell",
-    "Smart",
-    "SsangYong",
-    "Standard",
-    "Subaru",
-    "Sunbeam",
-    "Suzuki",
-    "Tesla",
-    "Toyota",
-    "Triumph",
-    "TVR",
-    "Ultima",
-    "Vauxhall",
-    "Viscount",
-    "Volkswagen",
-    "Volvo",
-    "VRS",
-    "Westfield",
-    "Wiesmann",
-    "XPENG",
-    "Yugo"
-]
 
-def parse_vehicle_title(title):
-    """
-    Extract the year and make from an underwriter vehicle title.
+MODELS_FILE = "autotrader_models.json"
 
-    Example:
-        2016 BMW 5 SERIES 520d [190] SE 4dr Step Auto
 
-    Returns:
-        {
-            "year": 2016,
-            "make": "BMW",
-            "remaining": "5 SERIES 520d [190] SE 4dr Step Auto"
-        }
-    """
+def load_models():
 
-    title = title.strip()
+    with open(
+        MODELS_FILE,
+        "r",
+        encoding="utf-8"
+    ) as file:
 
-    # -----------------------------
+        return json.load(file)
+
+
+def normalise(text):
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text.strip()
+    )
+
+
+def parse_title(title, models):
+
+    title = normalise(title)
+
+    # --------------------------------------------------
     # Extract year
-    # -----------------------------
+    # --------------------------------------------------
 
     year_match = re.match(
         r"^(\d{4})\s+",
@@ -180,53 +39,201 @@ def parse_vehicle_title(title):
     )
 
     if not year_match:
-        return None
+        return {
+            "title": title,
+            "year": None,
+            "make": None,
+            "model": None,
+            "variant": None,
+            "error": "Could not find year"
+        }
 
-    year = int(year_match.group(1))
+    year = int(
+        year_match.group(1)
+    )
 
     remaining = title[
         year_match.end():
     ]
 
-    # -----------------------------
-    # Find make
-    # -----------------------------
+    # --------------------------------------------------
+    # Identify make
+    # --------------------------------------------------
 
-    # Longest first prevents things like
-    # "Land Rover" being interpreted incorrectly.
-    makes = sorted(
-        AUTOTRADER_MAKES,
+    make = None
+
+    # Longest makes first
+    # This prevents something like "MG"
+    # being considered before a longer make.
+    sorted_makes = sorted(
+        models.keys(),
         key=len,
         reverse=True
     )
 
-    make = None
+    for make_name in sorted_makes:
 
-    for candidate in makes:
+        pattern = (
+            r"^"
+            + re.escape(make_name)
+            + r"(?:\s+|$)"
+        )
 
-        if remaining.lower().startswith(
-            candidate.lower() + " "
+        if re.match(
+            pattern,
+            remaining,
+            re.IGNORECASE
         ):
 
-            make = candidate
+            make = make_name
 
-            remaining = remaining[
-                len(candidate):
-            ].strip()
+            remaining = re.sub(
+                pattern,
+                "",
+                remaining,
+                count=1,
+                flags=re.IGNORECASE
+            )
 
             break
 
     if make is None:
-        return None
+        return {
+            "title": title,
+            "year": year,
+            "make": None,
+            "model": None,
+            "variant": remaining,
+            "error": "Could not find make"
+        }
+
+    remaining = normalise(
+        remaining
+    )
+
+    # --------------------------------------------------
+    # Identify model
+    # --------------------------------------------------
+
+    model = None
+
+    make_models = models.get(
+        make,
+        []
+    )
+
+    # Longest model names first.
+    #
+    # This matters for things such as:
+    #
+    # "4 Series"
+    # "4 Series Gran Coupe"
+    #
+    # We want the longest valid match.
+    sorted_models = sorted(
+        make_models,
+        key=lambda item: len(item["name"]),
+        reverse=True
+    )
+
+    for model_data in sorted_models:
+
+        model_name = model_data["name"]
+
+        pattern = (
+            r"^"
+            + re.escape(model_name)
+            + r"(?:\s+|$)"
+        )
+
+        if re.match(
+            pattern,
+            remaining,
+            re.IGNORECASE
+        ):
+
+            model = model_data
+
+            remaining = re.sub(
+                pattern,
+                "",
+                remaining,
+                count=1,
+                flags=re.IGNORECASE
+            )
+
+            break
+
+    # --------------------------------------------------
+    # Variant
+    # --------------------------------------------------
+
+    variant = normalise(
+        remaining
+    )
 
     return {
+        "title": title,
         "year": year,
         "make": make,
-        "remaining": remaining
+        "model": model["name"] if model else None,
+        "model_value": model["value"] if model else None,
+        "variant": variant if variant else None,
+        "error": None if model else "Could not find model"
     }
 
-title = "2017 MERCEDES-BENZ A CLASS A180d Sport Premium 5dr"
 
-print(
-    parse_vehicle_title(title)
-)
+if __name__ == "__main__":
+
+    models = load_models()
+
+    test_titles = [
+        "2014 FORD FOCUS 1.0 125 EcoBoost Zetec S 5dr",
+        "2023 VAUXHALL CORSA 1.2 GS 5dr",
+        "2016 BMW 5 SERIES 520d [190] SE 4dr Step Auto",
+        "2017 MERCEDES-BENZ A CLASS A180d Sport Premium 5dr",
+        "2015 BMW 4 SERIES 420d [190] xDrive Luxury 5dr [Professional Media]"
+    ]
+
+    for title in test_titles:
+
+        result = parse_title(
+            title,
+            models
+        )
+
+        print()
+        print("=" * 60)
+        print(title)
+        print("=" * 60)
+
+        print(
+            "Year:",
+            result["year"]
+        )
+
+        print(
+            "Make:",
+            result["make"]
+        )
+
+        print(
+            "Model:",
+            result["model"]
+        )
+
+        print(
+            "Model value:",
+            result["model_value"]
+        )
+
+        print(
+            "Variant:",
+            result["variant"]
+        )
+
+        if result["error"]:
+            print(
+                "ERROR:",
+                result["error"]
+            )
