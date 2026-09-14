@@ -1,0 +1,801 @@
+import json
+import os
+from datetime import datetime
+from urllib.parse import urlparse
+
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+
+SEARCH_URL = (
+    "https://www.autotrader.co.uk/car-search?"
+    "channel=cars"
+    "&make=BMW"
+    "&model=4%20Series%20Gran%20Coupe"
+    "&only-writeoff-categories=on"
+    "&postcode=SW1X%207PL"
+    "&sort=relevance"
+    "&year-from=2022"
+    "&year-to=2026"
+)
+
+RAW_HTML_DIR = "raw"
+LISTINGS_FILE = "listings.json"
+
+CHROME_URL = "http://localhost:9222"
+
+
+def get_search_page(context):
+    """
+    Find an existing AutoTrader search page.
+
+    If one doesn't exist, create a new page and open SEARCH_URL.
+    """
+
+    for page in context.pages:
+
+        if "autotrader.co.uk/car-search" in page.url:
+
+            print("Found existing AutoTrader search page:")
+            print(page.url)
+
+            return page
+
+    print("No AutoTrader search page found.")
+    print("Opening search page...")
+
+    page = context.new_page()
+
+    page.goto(
+        SEARCH_URL,
+        wait_until="domcontentloaded"
+    )
+
+    return page
+
+
+def get_listings(page):
+    """
+    Find advert cards on the AutoTrader search page.
+    """
+
+    print("Waiting for listings to load...")
+
+    page.wait_for_timeout(5000)
+
+    html = page.content()
+
+    # Save the search page HTML while we're debugging.
+    with open(
+        "search.html",
+        "w",
+        encoding="utf-8"
+    ) as file:
+        file.write(html)
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    listings = soup.find_all(
+        "div",
+        attrs={
+            "data-testid": lambda value:
+                value and value.startswith("advertCard-")
+        }
+    )
+
+    print(
+        f"Found {len(listings)} advert cards "
+        "using advertCard selector."
+    )
+
+    return listings
+
+
+def get_listing_urls(listings):
+    """
+    Extract unique listing URLs from advert cards.
+    """
+
+    urls = []
+
+    for listing in listings:
+
+        links = listing.find_all(
+            "a",
+            href=True
+        )
+
+        for link in links:
+
+            url = link["href"]
+
+            if "/car-details/" not in url:
+                continue
+
+            if url.startswith("/"):
+                url = (
+                    "https://www.autotrader.co.uk"
+                    + url
+                )
+
+            # Remove duplicate URLs.
+            if url not in urls:
+                urls.append(url)
+
+    return urls
+
+def find_json_data(soup):
+    """
+    Look for JSON data embedded in the page.
+    """
+
+    scripts = soup.find_all(
+        "script"
+    )
+
+    for script in scripts:
+
+        script_type = script.get(
+            "type"
+        )
+
+        if script_type == "application/ld+json":
+
+            print()
+            print(
+                "Found JSON-LD:"
+            )
+
+            print(
+                script.get_text(
+                    strip=True
+                )[:5000]
+            )
+
+'''
+def scrape_listing(page, url, index):
+    """
+    Open an individual advert and save its raw HTML.
+    """
+
+    print()
+    print(
+        f"[{index}] Opening listing:"
+    )
+    print(url)
+
+    page.goto(
+        url,
+        wait_until="domcontentloaded"
+    )
+
+    page.wait_for_timeout(3000)
+
+    html = page.content()
+
+    filename = os.path.join(
+        RAW_HTML_DIR,
+        f"listing_{index:03}.html"
+    )
+
+    with open(
+        filename,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        file.write(html)
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    title = None
+
+    if soup.title:
+        title = soup.title.get_text(
+            strip=True
+        )
+
+    return {
+        "url": page.url,
+        "title": title,
+        "raw_html": filename
+    }
+'''
+def scrape_listing(page, url, index):
+    """
+    Open an individual AutoTrader advert, save its raw HTML,
+    and extract the main vehicle information.
+    """
+
+    print()
+    print(f"[{index}] Opening listing:")
+    print(url)
+
+    # --------------------------------------------------
+    # Open listing
+    # --------------------------------------------------
+
+    page.goto(
+        url,
+        wait_until="domcontentloaded"
+    )
+
+    page.wait_for_timeout(3000)
+
+    # Wait for the main listing container
+    try:
+        page.wait_for_selector(
+            "#top",
+            timeout=10000
+        )
+    except Exception:
+        print("WARNING: #top did not appear")
+
+    print("Current URL:", page.url)
+    print("Page title:", page.title())
+    print("#top count:", page.locator("#top").count())
+
+    # --------------------------------------------------
+    # Get HTML
+    # --------------------------------------------------
+
+    html = page.content()
+
+    filename = os.path.join(
+        RAW_HTML_DIR,
+        f"listing_{index:03}.html"
+    )
+
+    with open(
+        filename,
+        "w",
+        encoding="utf-8"
+    ) as file:
+        file.write(html)
+
+    # --------------------------------------------------
+    # Parse HTML
+    # --------------------------------------------------
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    top = soup.find(
+        "div",
+        id="top"
+    )
+
+    if top is None:
+
+        print("WARNING: Could not find #top")
+
+        return {
+            "url": page.url,
+            "raw_html": filename
+        }
+
+    # --------------------------------------------------
+    # Title
+    # --------------------------------------------------
+
+    title = None
+
+    if soup.title:
+
+        title = soup.title.get_text(
+            strip=True
+        )
+
+    # --------------------------------------------------
+    # Images
+    # --------------------------------------------------
+
+    images = []
+
+    for image in top.find_all("img"):
+
+        src = image.get("src")
+        alt = image.get("alt")
+
+        if not src:
+            continue
+
+        images.append({
+            "url": src,
+            "description": alt
+        })
+
+    # --------------------------------------------------
+    # Information section
+    # --------------------------------------------------
+
+    info_section = top.select_one(
+        "section.sc-2g3p0n-1"
+    )
+
+    if info_section is None:
+
+        print(
+            "WARNING: Could not find information section"
+        )
+
+        return {
+            "url": page.url,
+            "title": title,
+            "images": images,
+            "raw_html": filename
+        }
+
+    # --------------------------------------------------
+    # Vehicle specifications
+    # --------------------------------------------------
+
+    specifications = {}
+
+    for container in info_section.find_all(
+        "div",
+        class_=lambda value:
+            value and "sc-1yzvd0s-4" in value
+    ):
+
+        paragraphs = container.find_all("p")
+
+        if len(paragraphs) < 2:
+            continue
+
+        label = paragraphs[0].get_text(
+            " ",
+            strip=True
+        )
+
+        value = paragraphs[1].get_text(
+            " ",
+            strip=True
+        )
+
+        specifications[label] = value
+
+    # --------------------------------------------------
+    # Print specifications
+    # --------------------------------------------------
+
+    print()
+    print("SPECIFICATIONS")
+    print("=" * 40)
+
+    for key, value in specifications.items():
+
+        print(
+            f"{key}: {value}"
+        )
+
+    # --------------------------------------------------
+    # Basic listing information
+    # --------------------------------------------------
+
+    location = None
+    distance = None
+    writeoff_category = None
+    vehicle_name = None
+    variant = None
+    price = None
+    seller_type = None
+
+    # --------------------------------------------------
+    # Key information
+    # --------------------------------------------------
+
+    key_information = info_section.select_one(
+        '[data-testid="key-information"]'
+    )
+
+    if key_information:
+
+        spans = key_information.find_all(
+            "span"
+        )
+
+        if len(spans) >= 2:
+
+            location = spans[0].get_text(
+                " ",
+                strip=True
+            )
+
+            distance = spans[1].get_text(
+                " ",
+                strip=True
+            )
+
+    # --------------------------------------------------
+    # Pricing / vehicle information
+    # --------------------------------------------------
+
+    pricing = info_section.select_one(
+        '[data-testid="pricing"]'
+    )
+
+    if pricing:
+
+        # Write-off category
+        writeoff_element = pricing.find(
+            "p",
+            string=lambda text:
+                text and text.strip() in [
+                    "Cat S",
+                    "Cat N",
+                    "Cat A",
+                    "Cat B"
+                ]
+        )
+
+        if writeoff_element:
+
+            writeoff_category = (
+                writeoff_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+        # Vehicle name
+        vehicle_element = pricing.find(
+            "h1"
+        )
+
+        if vehicle_element:
+
+            vehicle_name = (
+                vehicle_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+        # Variant
+        variant_element = pricing.select_one(
+            "h1 + div span"
+        )
+
+        if variant_element:
+
+            variant = (
+                variant_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+        # Price
+        price_element = pricing.select_one(
+            '[data-testid="advert-price"]'
+        )
+
+        if price_element:
+
+            price = (
+                price_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+    # --------------------------------------------------
+    # Seller information
+    # --------------------------------------------------
+
+    next_steps = info_section.select_one(
+        '[data-testid="next-steps"]'
+    )
+
+    if next_steps:
+
+        seller_element = next_steps.find(
+            "span",
+            string=lambda text:
+                text and text.strip() in [
+                    "Private seller",
+                    "Trade seller"
+                ]
+        )
+
+        if seller_element:
+
+            seller_type = (
+                seller_element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+    # --------------------------------------------------
+    # Print basic information
+    # --------------------------------------------------
+
+    print()
+    print("BASIC INFORMATION")
+    print("=" * 40)
+
+    print(f"Location: {location}")
+    print(f"Distance: {distance}")
+    print(f"Write-off category: {writeoff_category}")
+    print(f"Vehicle: {vehicle_name}")
+    print(f"Variant: {variant}")
+    print(f"Price: {price}")
+    print(f"Seller: {seller_type}")
+
+    # --------------------------------------------------
+    # Description
+    # --------------------------------------------------
+
+    description = None
+
+    description_button = page.locator(
+        '[data-testid="description-signpost"]'
+    )
+
+    if description_button.count() > 0:
+
+        try:
+
+            print()
+            print("Opening full description...")
+
+            description_button.click()
+
+            description_body = page.locator(
+                "div.QlZ4CW__body"
+            )
+
+            description_body.wait_for(
+                state="visible",
+                timeout=5000
+            )
+
+            description = (
+                description_body.inner_text().strip()
+            )
+
+            print("Description found.")
+
+        except Exception as error:
+
+            print(
+                f"WARNING: Could not extract full description: {error}"
+            )
+
+    else:
+
+        print(
+            "WARNING: Description button not found."
+        )
+    # --------------------------------------------------
+    # Result
+    # --------------------------------------------------
+
+    listing = {
+        "url": page.url,
+        "title": title,
+
+        "location": location,
+        "distance": distance,
+        "writeoff_category": writeoff_category,
+
+        "vehicle": vehicle_name,
+        "variant": variant,
+        "price": price,
+        "seller_type": seller_type,
+
+        "specifications": specifications,
+
+        "description": description,
+
+        "images": images,
+
+        "raw_html": filename
+    }
+
+    return listing
+def save_results(results):
+    """
+    Save search metadata and scraped listings.
+    """
+
+    data = {
+        "search": {
+            "url": SEARCH_URL
+        },
+
+        "scraped_at": datetime.now().isoformat(),
+
+        "result_count": len(results),
+
+        "results": results
+    }
+
+    with open(
+        LISTINGS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            data,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    print()
+    print(
+        f"Saved {len(results)} listings "
+        f"to {LISTINGS_FILE}"
+    )
+
+
+def main():
+
+    # Create raw directory if it doesn't exist.
+    os.makedirs(
+        RAW_HTML_DIR,
+        exist_ok=True
+    )
+
+    with sync_playwright() as p:
+
+        print(
+            f"Connecting to Chromium at "
+            f"{CHROME_URL}"
+        )
+
+        browser = p.chromium.connect_over_cdp(
+            CHROME_URL
+        )
+
+        context = browser.contexts[0]
+
+        print()
+        '''print("Current browser pages:")
+
+        for index, page in enumerate(
+            context.pages
+        ):
+
+            print(
+                f"[{index}] {page.url}"
+            )
+        '''
+        # ---------------------------------------------
+        # GET SEARCH PAGE
+        # ---------------------------------------------
+
+        search_page = get_search_page(
+            context
+        )
+
+        print()
+        print("Search page:")
+        print(search_page.url)
+
+        print(
+            "Title:",
+            search_page.title()
+        )
+
+        # ---------------------------------------------
+        # FIND LISTINGS
+        # ---------------------------------------------
+
+        listings = get_listings(
+            search_page
+        )
+
+        # ---------------------------------------------
+        # GET URLS
+        # ---------------------------------------------
+
+        urls = get_listing_urls(
+            listings
+        )
+
+        print()
+        print(
+            f"Found {len(urls)} listing URLs."
+        )
+
+        # ---------------------------------------------
+        # IF NO URLS WERE FOUND
+        # ---------------------------------------------
+
+        if not urls:
+
+            print()
+            print(
+                "No listing URLs were found."
+            )
+
+            print(
+                "The search page has been saved as:"
+            )
+
+            print(
+                "search.html"
+            )
+
+            print()
+            print(
+                "Inspect search.html to determine "
+                "the current AutoTrader structure."
+            )
+
+            save_results([])
+
+            return
+
+        # ---------------------------------------------
+        # CREATE LISTING PAGE
+        # ---------------------------------------------
+
+        listing_page = context.new_page()
+
+        results = []
+
+        # ---------------------------------------------
+        # SCRAPE EACH LISTING
+        # ---------------------------------------------
+
+        for index, url in enumerate(
+            urls,
+            start=1
+        ):
+
+            try:
+
+                result = scrape_listing(
+                    listing_page,
+                    url,
+                    index
+                )
+
+                results.append(
+                    result
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Error scraping listing "
+                    f"{index}: {error}"
+                )
+
+                results.append(
+                    {
+                        "url": url,
+                        "error": str(error)
+                    }
+                )
+
+        # ---------------------------------------------
+        # CLOSE LISTING PAGE
+        # ---------------------------------------------
+
+        listing_page.close()
+
+        # ---------------------------------------------
+        # SAVE JSON
+        # ---------------------------------------------
+
+        save_results(
+            results
+        )
+
+
+if __name__ == "__main__":
+    main()

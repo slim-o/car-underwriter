@@ -4,3 +4,5 @@ pillow
 python-dotenv
 requests
 playwright
+streamlit
+beautifulsoup4

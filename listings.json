@@ -1,0 +1,124 @@
+{
+    "search": {
+        "url": "https://www.autotrader.co.uk/car-search?channel=cars&make=BMW&model=4%20Series%20Gran%20Coupe&only-writeoff-categories=on&postcode=SW1X%207PL&sort=relevance&year-from=2022&year-to=2026"
+    },
+    "scraped_at": "2026-09-14T16:08:43.876638",
+    "result_count": 2,
+    "results": [
+        {
+            "url": "https://www.autotrader.co.uk/car-details/202608145089527?sort=relevance&twcs=true&searchId=04cc935a-bf81-4e38-a3ac-3d100822daf2&make=BMW&model=4+Series+Gran+Coupe&only-writeoff-categories=on&page=1&postcode=SW1X+7PL&year-from=2022&year-to=2026&advertising-location=at_cars&fromsra=&backLinkQueryParams=channel%3Dcars%26make%3DBMW%26model%3D4%2520Series%2520Gran%2520Coupe%26only-writeoff-categories%3Don%26postcode%3DSW1X%25207PL%26sort%3Drelevance%26year-from%3D2022%26year-to%3D2026%26flrfc%3D1&calc-deposit=2595&calc-term=48&calc-mileage=10000&calc-selected-product=PCP",
+            "title": "2024 Black BMW 4 Series Gran Coupe for sale for £25,950 in SHEFFIELD, YORKSHIRE",
+            "location": "Sheffield",
+            "distance": "142 miles away",
+            "writeoff_category": "Cat S",
+            "vehicle": "2024 BMW 4 Series Gran Coupe",
+            "variant": "2.0 420i M Sport Auto Euro 6 (s/s) 5dr",
+            "price": "£25,950",
+            "seller_type": null,
+            "specifications": {
+                "Mileage": "27,000 miles",
+                "Registration": "2024 (24 reg)",
+                "Fuel type": "Petrol",
+                "Body type": "Hatchback",
+                "Engine": "2.0L",
+                "Gearbox": "Automatic",
+                "Doors": "5",
+                "Seats": "5",
+                "Emission class": "Euro 6",
+                "Body colour": "Black",
+                "Warranty": "3 months"
+            },
+            "description": "Description\n\nThis 2024 BMW 4 Series Gran Coupe 420i M Sport combines sleek design with practical performance. As a Euro 6 compliant vehicle, it is powered by a 2.0 litre petrol engine and comes with a 3 month warranty for peace of mind. The vehicles first MOT is due in March 2027 with its most recent service completed on 14 August 2026 at 27,000 miles.\n\nThe M Sport trim is enhanced by the M Sport Pro Package and includes LED headlights for improved visibility. Inside, the BMW Live Cockpit Plus system integrates Bluetooth connectivity, while the Technology Package adds a premium branded sound system for an elevated audio experience. Parking is made straightforward with the Parking Assistant, which utilises front and rear sensors alongside a rear camera. This model also offers a large boot space for added utility, and it is capable of accelerating from 0 to 62mph in 7.9 seconds, providing a balanced driving experience. This vehicle is on the V car register recorded at a category S but fully repaired.\n\nE.S.A Automotive LTD\n\nVehicle registered: 05/03/2024\nBuying with ESA AUTO MOTIVE LTD\n\nESA Automotive is a family-run, pet-friendly used car dealership. We offer a relaxed, honest, and pressure-free buying experience. First-time buyer? Upgrading your family car? We make the process simple and comfortable.  Our vehicles are carefully sourced from private owners, not auctions. Every car is MOT tested, serviced, professionally valeted, and detailed to high standards in our in-house preparation centre, ensuring quality, reliability, and confidence in your purchase. Our team is here to help, not sell. We take time to understand your needs and provide clear, straightforward advice at your pace.  Visit us and experience a welcoming, family-friendly environment with refreshments available. We are proud partners of the AA Dealer Promise, Autoguard Warranties, and a range of Motor Finance providers, offering trusted protection and flexible finance options. Looking for a reputable used car dealer? ESA Automotive is here for you.",
+            "images": [
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w800/b506e670fb2d4017bbf6f578ec2a701a.jpg",
+                    "description": "Front Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/de5657172e3d4b9ab500f035447dc2ca.jpg",
+                    "description": "Promotional Material"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/aa7099a586fe44edbf76ec0068333476.jpg",
+                    "description": "Rear Left"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/46f4d2a577e04f95ac2b9e0b8bb8fc0c.jpg",
+                    "description": "Front"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/db355dba98de484b9286b84e9a425dc0.jpg",
+                    "description": "Front Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/479cc9eef97f4e8493fbe682f0494601.jpg",
+                    "description": "Front Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/8c3928069fdd44378972a692c108d076.jpg",
+                    "description": "Front Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/dealer-logo/at2/adbranding/10018106/images/fpa_logo.gif",
+                    "description": "Seller Logo"
+                }
+            ],
+            "raw_html": "raw\\listing_001.html"
+        },
+        {
+            "url": "https://www.autotrader.co.uk/car-details/202608044781933?sort=relevance&searchId=04cc935a-bf81-4e38-a3ac-3d100822daf2&make=BMW&model=4+Series+Gran+Coupe&only-writeoff-categories=on&page=1&postcode=SW1X+7PL&year-from=2022&year-to=2026&advertising-location=at_cars&fromsra=&backLinkQueryParams=channel%3Dcars%26make%3DBMW%26model%3D4%2520Series%2520Gran%2520Coupe%26only-writeoff-categories%3Don%26postcode%3DSW1X%25207PL%26sort%3Drelevance%26year-from%3D2022%26year-to%3D2026%26flrfc%3D1&calc-deposit=2750&calc-term=48&calc-mileage=10000&calc-selected-product=PCP",
+            "title": "2024 Black BMW 4 Series Gran Coupe for sale for £27,500 in BIRMINGHAM, WEST MIDLANDS",
+            "location": "Birmingham",
+            "distance": "105 miles away",
+            "writeoff_category": "Cat N",
+            "vehicle": "2024 BMW 4 Series Gran Coupe",
+            "variant": "2.0 420i M Sport Auto Euro 6 (s/s) 5dr",
+            "price": "£27,500",
+            "seller_type": "Private seller",
+            "specifications": {
+                "Mileage": "12,393 miles",
+                "Registration": "2024 (24 reg)",
+                "Fuel type": "Petrol",
+                "Body type": "Hatchback",
+                "Engine": "2.0L",
+                "Gearbox": "Automatic",
+                "Doors": "5",
+                "Seats": "5",
+                "Emission class": "Euro 6",
+                "Body colour": "Black"
+            },
+            "description": "Description\n\nBMW 4 Series Gran Coupe M Sport (2024) - Black - 12,000 Miles - Full BMW Service \nThis is a fantastic example of BMW's stylish and practical Gran Coupe, combining sporty performance, premium comfort and everyday usability.\n\nThe car is in excellent condition inside and out and has been exceptionally well maintained, with all servicing carried out by BMW. It drives perfectly and is a pleasure to drive, offering the refined performance and handling expected from an M Sport model.\n\nPlease note the vehicle is recorded as **Category N (non-structural damage)**. The damage was non-structural and the vehicle has been professionally repaired. It is fully roadworthy and drives exactly as it should, which is reflected in the attractive price compared to similar non-categorised vehicles.\n\nHighlights:\n- 2024 BMW 4 Series Gran Coupe M Sport\n- Black exterior\n- Only 12,000 miles\n- Full BMW service history\n- Low mileage\n- Excellent condition throughout\n- Smooth engine and gearbox\n- M Sport styling and specification\n- Cat N (non-structural damage)\n\nA superb opportunity to own a nearly new BMW 4 Series Gran Coupe M Sport with very low mileage and full BMW history at a significant saving. First to see will appreciate the condition and value on offer.\n\nViewing and test drives welcome. Any inspection is encouraged.**\n\n Please get in touch for more information or to arrange a viewing.\n\nVehicle registered: 25/07/2024",
+            "images": [
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w800/710b49802a6e447ca1eababbfc5ef7c5.jpg",
+                    "description": "Side Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/aaa96f64523c43b79f8d92466ef27971.jpg",
+                    "description": "Front"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/1dc46132654746769c143f120c74e0fe.jpg",
+                    "description": "Side Left"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/a1b968fb1b89467b94fb85f5aa68944f.jpg",
+                    "description": "Rear"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/874ec0a086474d3bbd9653f3a1a82e66.jpg",
+                    "description": "Side Right"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/dcdc765e8d44421aad81ac0c65fbca8f.jpg",
+                    "description": "Seats Rear"
+                },
+                {
+                    "url": "https://m.atcdn.co.uk/a/media/w600/81ea65f87c76444781d8e2faafd1edb0.jpg",
+                    "description": "Seat Driver"
+                }
+            ],
+            "raw_html": "raw\\listing_002.html"
+        }
+    ]
+}

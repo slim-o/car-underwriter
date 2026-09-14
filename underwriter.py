@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 
 from finance import D, ceiling, copart_fees, investment, performance
+from comparables import compute_exit_tiers, load_comparables
 
 load_dotenv()
 
@@ -41,6 +42,13 @@ DEFAULT_SETTINGS = {
     "transport_including_vat": None,
     "other_acquisition_costs": 0,
     "exit_costs_and_deductions": 0,
+    "exit": {
+        "advert_price": None,
+        "underwritten_sale_price": None,
+        "quick_sale_price": None,
+        "trade_fallback_price": None,
+        "source": "UNDERWRITTEN",
+    },
     "contingency": 500,
     "labour_hourly_rate_including_vat": 45,
     "labour_rate_confirmed": False,
@@ -213,6 +221,20 @@ def local_evidence_file(case, name):
     return candidate if candidate.is_file() else None
 
 
+def try_reveal_vrn(page):
+    try:
+        link = page.locator("vin-vrn-masking a").first
+        if link.count() == 0:
+            return False
+        if not link.is_visible():
+            return False
+        link.click(timeout=2000)
+        page.wait_for_timeout(250)
+        return True
+    except Exception:
+        return False
+
+
 def candidate_image_urls(thumbnail_url):
     url = (thumbnail_url or "").strip()
     if not url.startswith("http"):
@@ -237,6 +259,8 @@ def candidate_image_urls(thumbnail_url):
 
 def collect_thumbnail_urls(page, max_rounds=40):
     container = page.locator("div.p-galleria-thumbnail-items")
+    if container.count() == 0:
+        container = page.locator("p-galleria div[class*='thumbnail']")
     if container.count() == 0:
         return []
 
@@ -264,26 +288,41 @@ def collect_thumbnail_urls(page, max_rounds=40):
 
         try:
             container.hover(timeout=2000)
-            page.mouse.wheel(0, 900)
+            container.evaluate(
+                "(el) => { el.scrollTop = (el.scrollTop || 0) + 900; }"
+            )
             page.wait_for_timeout(250)
         except Exception:
-            break
+            try:
+                page.mouse.wheel(0, 900)
+                page.wait_for_timeout(250)
+            except Exception:
+                break
 
     return sorted(urls)
 
 
 def download_gallery_images(page, case):
+    try_reveal_vrn(page)
     thumbnails = collect_thumbnail_urls(page)
     if not thumbnails:
-        return {"downloaded": 0, "errors": ["No gallery thumbnails found"]}
+        manifest = {
+            "captured_at": utc_now(),
+            "thumbnails_found": 0,
+            "items": [],
+            "errors": [
+                "No gallery thumbnails found. Ensure the Photos/gallery section is visible."
+            ],
+        }
+        save_json(case / "gallery.json", manifest)
+        return {"downloaded": 0, "errors": manifest["errors"]}
 
     photos_dir = case / "photos"
     photos_dir.mkdir(exist_ok=True)
-    if any(path.suffix.lower() in IMAGE_EXTENSIONS for path in photos_dir.iterdir()):
-        return {
-            "downloaded": 0,
-            "errors": ["Photos folder already contains images; not overwriting"],
-        }
+    existing = sorted(
+        path for path in photos_dir.iterdir()
+        if path.suffix.lower() in IMAGE_EXTENSIONS
+    )
 
     manifest = {
         "captured_at": utc_now(),
@@ -293,16 +332,61 @@ def download_gallery_images(page, case):
     }
 
     seen_hashes = set()
+    next_index = 1
+    for path in existing:
+        next_index += 1
+        try:
+            seen_hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
+        except Exception:
+            continue
     downloaded = 0
 
-    for index, thumbnail in enumerate(thumbnails, start=1):
+    for index, thumbnail in enumerate(thumbnails, start=next_index):
         saved = None
         used_url = None
         sha = None
 
-        for candidate in candidate_image_urls(thumbnail):
+        # Click through the gallery if possible so the full-size image URL is loaded.
+        try:
+            page.evaluate(
+                """(src) => {
+  const img = Array.from(document.querySelectorAll('img.p-galleria-img-thumbnail'))
+    .find(e => (e.getAttribute('src') || '').trim() === src);
+  if (img) img.click();
+}""",
+                thumbnail,
+            )
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+        try:
+            main_src = page.locator("p-galleria img").evaluate_all(
+                """els => {
+  const candidates = els
+    .map(e => ({src: (e.currentSrc || e.src || '').trim(), a: e.naturalWidth * e.naturalHeight}))
+    .filter(x => x.src && x.a > 200*200);
+  candidates.sort((a,b) => b.a - a.a);
+  return candidates.length ? candidates[0].src : null;
+}"""
+            )
+            if isinstance(main_src, list) and main_src:
+                main_src = main_src[0]
+        except Exception:
+            main_src = None
+
+        url_candidates = []
+        if main_src:
+            url_candidates.extend(candidate_image_urls(main_src))
+        url_candidates.extend(candidate_image_urls(thumbnail))
+
+        for candidate in url_candidates:
             try:
-                response = page.request.get(candidate, timeout=30000)
+                response = page.request.get(
+                    candidate,
+                    timeout=30000,
+                    headers={"Referer": page.url},
+                )
                 if not response.ok:
                     continue
                 ctype = (response.headers or {}).get("content-type", "")
@@ -460,6 +544,10 @@ def capture(url, case):
                 "If you see an Imperva security check, complete it in the "
                 "browser first (ad blockers can interfere)."
             )
+            print(
+                "If VRN/registration is masked (e.g. **66***), click it in the "
+                "lot details to reveal it before capturing."
+            )
 
             while True:
                 input("Return here and press Enter when ready to capture: ")
@@ -468,6 +556,7 @@ def capture(url, case):
                 if current_host not in {"copart.co.uk", "www.copart.co.uk"}:
                     raise ValueError("Browser is no longer on Copart UK")
 
+                try_reveal_vrn(page)
                 text = page.locator("body").inner_text(timeout=20000)
                 if any(marker.lower() in text.lower() for marker in IMPERVA_MARKERS):
                     print(
@@ -1025,6 +1114,21 @@ def analyse(case, consent):
     ):
         settings["wbac"]["registration"] = listing_parsed["vrn"]
         save_json(case / "settings.json", settings)
+
+    exit_settings = settings.get("exit") or {}
+    comps = load_comparables(case)
+    comps_exit = compute_exit_tiers(comps) if comps else None
+
+    exit_value = (
+        exit_settings.get("underwritten_sale_price")
+        or exit_settings.get("quick_sale_price")
+        or exit_settings.get("advert_price")
+        or exit_settings.get("trade_fallback_price")
+        or settings.get("wbac", {}).get("value")
+    )
+    exit_source = exit_settings.get("source") or (
+        "WBAC" if exit_value == settings.get("wbac", {}).get("value") else "EXIT"
+    )
     photos = sorted(
         path for path in (case / "photos").iterdir()
         if path.suffix.lower() in IMAGE_EXTENSIONS
@@ -1113,8 +1217,13 @@ def analyse(case, consent):
 
     quote = settings.get("wbac") or {}
     quote_value = quote.get("value")
+    if exit_value is None or D(exit_value) <= 0:
+        missing.append(
+            "Exit value missing (set settings.exit.underwritten_sale_price "
+            "or provide settings.wbac.value)"
+        )
     if quote_value is None or D(quote_value) <= 0:
-        missing.append("WBAC value missing (run capture-wbac or set wbac.value)")
+        notes.append("WBAC value missing (fallback not available)")
     if not quote.get("cat_n_declared"):
         notes.append("Cat N declaration not confirmed")
     if not quote.get("repaired_condition_basis_confirmed"):
@@ -1142,7 +1251,7 @@ def analyse(case, consent):
     scenarios = {}
     net_exit = None
     if not missing:
-        net_exit = D(quote_value) - D(settings["exit_costs_and_deductions"])
+        net_exit = D(exit_value) - D(settings["exit_costs_and_deductions"])
         if net_exit <= 0:
             raise ValueError("Net exit must be positive")
 
@@ -1223,9 +1332,11 @@ def analyse(case, consent):
         "missing_inputs": missing,
         "blocking_missing_evidence": missing,
         "review_notes": notes,
-        "exit_value_gbp": float(D(quote_value)) if quote_value is not None else None,
+        "exit_source": exit_source,
+        "exit_value_gbp": float(D(exit_value)) if exit_value is not None else None,
         "exit_deductions_gbp": float(D(settings["exit_costs_and_deductions"])),
         "net_exit_gbp": float(net_exit) if net_exit is not None else None,
+        "comparables_exit": comps_exit,
         "financial_scenarios": scenarios,
     }
     save_json(case / "report.json", report)
@@ -1267,7 +1378,7 @@ def analyse(case, consent):
     if net_exit is None:
         lines.append("- Not computed: missing `settings.wbac.value`.")
     else:
-        lines.append(f"- Exit value (WBAC): {fmt_gbp(quote_value)}")
+        lines.append(f"- Exit value ({exit_source}): {fmt_gbp(exit_value)}")
         lines.append(
             f"- Exit deductions: {fmt_gbp(settings['exit_costs_and_deductions'])}"
         )

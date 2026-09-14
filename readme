@@ -37,6 +37,24 @@ Sanity check the financial engine:
 py -3 finance.py
 ```
 
+## 1b) UI (recommended)
+
+The UI lets you enter a lot number, edit `settings.json`, and run capture/WBAC/analyse from buttons.
+It also supports a simple manual "comparables" list to set exit prices (preferred over WBAC).
+It includes an "Auto Trader (offline)" importer that extracts listing URLs/prices from an HTML file you saved in your browser.
+
+Start Chrome with a CDP port (so the UI can reuse your logged-in session):
+
+```powershell
+start chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\Temp\\copart-debug-profile"
+```
+
+Then run:
+
+```powershell
+streamlit run ui.py
+```
+
 ## 2) Underwrite a single Copart lot (end-to-end)
 
 Pick a lot URL:
@@ -63,6 +81,8 @@ start chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\Temp\c
 python underwriter.py capture "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>" --cdp http://127.0.0.1:9222
 ```
 
+Tip: if the VRN/registration is masked (e.g. `**66***`), click it on the lot page to reveal it before capturing.
+
 If the photos were not downloaded, run:
 
 ```powershell
@@ -75,13 +95,13 @@ python underwriter.py collect-photos --case "cases/<LOTNUMBER>" --cdp http://127
 python underwriter.py capture "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>" --browser chrome
 ```
 
-If you get stuck on an Imperva “Additional security check is required” page:
+If you get stuck on an Imperva "Additional security check is required" page:
 - Complete the check in the opened browser window, then press Enter again in the terminal.
 - Ad/tracker blockers (extensions or system-wide) can prevent the checkbox from rendering.
 
 ### Option C (fallback): manual capture
 
-Use this if automation can’t render the gallery/challenge reliably.
+Use this if automation can't render the gallery/challenge reliably.
 
 ```powershell
 python underwriter.py capture-manual "https://www.copart.co.uk/lot/<LOTNUMBER>" --case "cases/<LOTNUMBER>"
@@ -103,7 +123,7 @@ Open `cases/<LOTNUMBER>/settings.json` and set these from evidence (not guesses)
 - `photos_complete_confirmed`: set `true` only after you confirm completeness/relevance
 - `ulez`: `YES` / `NO` / `UNKNOWN`
 - `ulez_evidence`: what checker you used + timestamp
-- `wbac.*`: your evidenced WBAC “declared Cat N” exit value
+- `wbac.*`: your evidenced WBAC "declared Cat N" exit value
   - If you have a screenshot for audit, put it inside the case folder and set `wbac.evidence_file` to that filename (optional).
 
 ### Optional: capture a WBAC valuation screenshot + extract the £ value
@@ -134,4 +154,4 @@ Look in `cases/<LOTNUMBER>/` for:
 - `report.md` (human-readable underwriting summary)
 - `report.json` (full evidence-backed record)
 
-If `report.md` says “BLOCKED pending evidence”, fix the missing items listed under “Missing evidence” and re-run `analyse`.
+If `report.md` says "BLOCKED pending evidence", fix the missing items listed under "Missing evidence" and re-run `analyse`.
