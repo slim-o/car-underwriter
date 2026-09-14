@@ -1,5 +1,4 @@
 import contextlib
-import contextlib
 from pathlib import Path
 from datetime import datetime
 
@@ -8,7 +7,8 @@ from playwright.sync_api import sync_playwright
 
 import underwriter
 import comparables
-import autotrader_offline
+import autotrader
+import title_parser
 
 
 CASES_DIR = Path("cases")
@@ -403,7 +403,7 @@ with col_b:
 st.divider()
 st.subheader("Outputs")
 tabs = st.tabs(
-    ["report.md", "capture.json", "gallery.json", "comparables", "listing.txt"]
+    ["report.md", "capture.json", "gallery.json", "listings.json", "comparables", "listing.txt"]
 )
 
 with tabs[0]:
@@ -417,6 +417,9 @@ with tabs[2]:
     st.code(load_text(case_dir / "gallery.json") or "(no gallery.json yet)", language="json")
 
 with tabs[3]:
+    st.code(load_text(case_dir / "listings.json") or "(no listings.json yet)", language="json")
+
+with tabs[4]:
     st.subheader("Comparables (manual)")
     comps = comparables.load_comparables(case_dir)
     if comps:
@@ -488,56 +491,104 @@ with tabs[3]:
         )
 
     st.divider()
-    st.subheader("Import Auto Trader (offline)")
+    st.subheader("Auto Trader (CDP scrape)")
     st.caption(
-        "Save an Auto Trader search results page as HTML in your browser, then "
-        "upload it here to extract listing URLs/prices. This tool does not "
-        "crawl Auto Trader."
+        "Runs your local `autotrader.py` scraper against an Auto Trader search URL "
+        "using your existing Chrome session (CDP). Saves `listings.json` into this "
+        "case folder and can import results into `comparables.json`."
     )
-    uploaded = st.file_uploader(
-        "Upload saved Auto Trader HTML",
-        type=["html", "htm"],
-        accept_multiple_files=False,
-    )
-    if uploaded is not None:
-        html = uploaded.getvalue().decode("utf-8", errors="replace")
-        listings = autotrader_offline.extract_listings_from_saved_html(html)
-        st.write(f"Found {len(listings)} listings in the saved page.")
-        if listings:
-            st.dataframe(
-                [
-                    {
-                        "title": l.title,
-                        "price_gbp": l.price_gbp,
-                        "url": l.url,
-                    }
-                    for l in listings[:50]
-                ],
-                use_container_width=True,
-            )
-            default_status = st.selectbox(
-                "Imported status",
-                options=["ACTIVE", "PRICE_REDUCED", "MARKED_SOLD_PRICE_UNKNOWN"],
-                index=0,
-            )
-            if st.button("Add all imported as comparables"):
-                for listing in listings:
-                    comps.append(
-                        comparables.Comparable(
-                            platform="AUTOTRADER",
-                            url=listing.url,
-                            title=listing.title,
-                            status=default_status,  # type: ignore[arg-type]
-                            asking_price_gbp=listing.price_gbp,
-                            first_seen=comparables.utc_now(),
-                            last_checked=comparables.utc_now(),
-                            notes="Imported from saved Auto Trader HTML.",
-                        )
-                    )
-                comparables.save_comparables(case_dir, comps)
-                st.success(f"Added {len(listings)} comparables.")
 
-with tabs[4]:
+    listing_title = None
+    try:
+        capture = underwriter.load_json(case_dir / "capture.json")
+        listing_title = (capture.get("listing_parsed") or {}).get("title")
+    except Exception:
+        listing_title = None
+    if not listing_title:
+        try:
+            listing_text = (case_dir / "listing.txt").read_text(encoding="utf-8")
+            listing_title = underwriter.parse_copart_listing_text(listing_text).get("title")
+        except Exception:
+            listing_title = None
+
+    suggested = {}
+    if listing_title:
+        try:
+            models = title_parser.load_models()
+            suggested = title_parser.parse_title(listing_title, models)
+        except Exception:
+            suggested = {}
+
+    st.write("Copart title:", listing_title or "(missing)")
+    if suggested:
+        st.write(
+            "Parsed:",
+            {
+                "year": suggested.get("year"),
+                "make": suggested.get("make"),
+                "model": suggested.get("model"),
+                "variant": suggested.get("variant"),
+            },
+        )
+
+    settings = underwriter.load_json(settings_path)
+    settings.setdefault("autotrader", {})
+    default_search_url = settings.get("autotrader", {}).get("search_url") or ""
+
+    postcode = st.text_input(
+        "Postcode (for search URL)",
+        value=settings.get("autotrader", {}).get("postcode") or "SW1X 7PL",
+    )
+
+    if (not default_search_url) and suggested.get("make") and suggested.get("model"):
+        year = suggested.get("year")
+        year_from = year - 1 if isinstance(year, int) else 2000
+        year_to = year + 1 if isinstance(year, int) else 2026
+        default_search_url = (
+            "https://www.autotrader.co.uk/car-search?channel=cars"
+            f"&make={suggested['make']}"
+            f"&model={suggested['model'].replace(' ', '%20')}"
+            "&only-writeoff-categories=on"
+            f"&postcode={postcode.replace(' ', '%20')}"
+            "&sort=relevance"
+            f"&year-from={year_from}"
+            f"&year-to={year_to}"
+        )
+
+    search_url = st.text_input("Auto Trader search URL", value=default_search_url)
+    limit = st.number_input("Limit adverts (0 = no limit)", min_value=0, value=0, step=1)
+    import_to_comps = st.checkbox("Import results into comparables.json", value=True)
+
+    if st.button("Run Auto Trader scrape (CDP) -> listings.json"):
+        if not search_url.strip().startswith("https://www.autotrader.co.uk/"):
+            st.error("Enter a valid https://www.autotrader.co.uk/ search URL")
+        else:
+            with st.spinner("Scraping Auto Trader... (this can take a while)"):
+                payload = autotrader.run_search(
+                    cdp_url=cdp,
+                    search_url=search_url.strip(),
+                    output_dir=case_dir,
+                    limit=None if int(limit) <= 0 else int(limit),
+                )
+
+            settings = underwriter.load_json(settings_path)
+            settings.setdefault("autotrader", {})
+            settings["autotrader"]["search_url"] = search_url.strip()
+            settings["autotrader"]["postcode"] = postcode
+            settings["autotrader"]["last_scraped_at"] = underwriter.utc_now()
+            underwriter.save_json(settings_path, settings)
+
+            st.success(
+                f"Saved {payload.get('result_count')} adverts to {case_dir / 'listings.json'}"
+            )
+
+            if import_to_comps:
+                new_items = underwriter.comparables_from_autotrader_payload(payload)
+                merged = underwriter.merge_comparables(comps, new_items)
+                comparables.save_comparables(case_dir, merged)
+                st.success(f"Imported {len(new_items)} adverts into comparables.json")
+
+with tabs[5]:
     listing_path = case_dir / "listing.txt"
     edited = st.text_area(
         "listing.txt",

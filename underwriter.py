@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from playwright.sync_api import sync_playwright
 
 from finance import D, ceiling, copart_fees, investment, performance
-from comparables import compute_exit_tiers, load_comparables
+from comparables import Comparable, compute_exit_tiers, load_comparables, save_comparables
 
 load_dotenv()
 
@@ -56,6 +56,10 @@ DEFAULT_SETTINGS = {
     "photos_complete_confirmed": False,
     "ulez": "UNKNOWN",
     "ulez_evidence": "",
+    "autotrader": {
+        "search_url": "",
+        "last_scraped_at": None,
+    },
     "wbac": {
         "value": None,
         "registration": "",
@@ -196,7 +200,7 @@ def extract_gbp_amounts(text):
         return []
     amounts = []
     for match in re.finditer(
-        r"£\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
+        r"(?:£|Â£)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)",
         text,
         flags=re.MULTILINE,
     ):
@@ -233,6 +237,88 @@ def try_reveal_vrn(page):
         return True
     except Exception:
         return False
+
+
+def load_autotrader_payload(case: Path) -> dict | None:
+    path = case / "listings.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def comparables_from_autotrader_payload(payload: dict) -> list[Comparable]:
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        return []
+
+    comps: list[Comparable] = []
+    now = utc_now()
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = (item.get("url") or "").strip()
+        if not url.startswith("http"):
+            continue
+
+        title = item.get("vehicle") or item.get("title")
+        price = parse_gbp(item.get("price"))
+
+        year = None
+        vehicle_text = (item.get("vehicle") or item.get("title") or "").strip()
+        match = re.match(r"^(\d{4})\b", vehicle_text)
+        if match:
+            try:
+                year = int(match.group(1))
+            except Exception:
+                year = None
+
+        comps.append(
+            Comparable(
+                platform="AUTOTRADER",
+                url=url,
+                title=title if isinstance(title, str) else None,
+                year=year,
+                cat=item.get("writeoff_category"),
+                location=item.get("location"),
+                seller_type=item.get("seller_type"),
+                status="ACTIVE",
+                first_seen=now,
+                last_checked=now,
+                asking_price_gbp=price,
+                notes="Imported from listings.json (Auto Trader scrape).",
+            )
+        )
+
+    return comps
+
+
+def merge_comparables(existing: list[Comparable], incoming: list[Comparable]) -> list[Comparable]:
+    by_url = {c.url: c for c in existing if c.url}
+    for comp in incoming:
+        if not comp.url:
+            continue
+        if comp.url in by_url:
+            current = by_url[comp.url]
+            if current.title is None:
+                current.title = comp.title
+            if current.asking_price_gbp is None:
+                current.asking_price_gbp = comp.asking_price_gbp
+            if current.year is None:
+                current.year = comp.year
+            if current.cat is None:
+                current.cat = comp.cat
+            if current.location is None:
+                current.location = comp.location
+            if current.seller_type is None:
+                current.seller_type = comp.seller_type
+            current.last_checked = comp.last_checked or current.last_checked
+            continue
+        by_url[comp.url] = comp
+    return list(by_url.values())
 
 
 def candidate_image_urls(thumbnail_url):
@@ -626,7 +712,7 @@ def capture(url, case):
         print("Review them for completeness and relevance before analysis.")
     else:
         print(f"Save this vehicle's original photos into {case / 'photos'}")
-    print("Then edit settings.json and add the WBAC evidence screenshot.")
+    print("Then edit settings.json and add exit values/comparables. WBAC is optional fallback evidence.")
     print("Do not mix photographs from different vehicles.")
 
 
@@ -663,7 +749,7 @@ def capture_manual(url, case):
     print("In your normal browser, open the lot page and pass any security check.")
     print(f"Paste the full lot details text into {case / 'listing.txt'}.")
     print(f"Save the vehicle's original photos into {case / 'photos'}.")
-    print("Then edit settings.json and add the WBAC evidence screenshot.")
+    print("Then edit settings.json and add exit values/comparables. WBAC is optional fallback evidence.")
 
 
 def collect_photos(url, case):
@@ -1116,19 +1202,37 @@ def analyse(case, consent):
         save_json(case / "settings.json", settings)
 
     exit_settings = settings.get("exit") or {}
+
     comps = load_comparables(case)
-    comps_exit = compute_exit_tiers(comps) if comps else None
+    autotrader_payload = load_autotrader_payload(case)
+    autotrader_comps = (
+        comparables_from_autotrader_payload(autotrader_payload)
+        if autotrader_payload
+        else []
+    )
+    merged_comps = merge_comparables(comps, autotrader_comps) if autotrader_comps else comps
+    comps_exit = compute_exit_tiers(merged_comps) if merged_comps else None
 
     exit_value = (
         exit_settings.get("underwritten_sale_price")
         or exit_settings.get("quick_sale_price")
         or exit_settings.get("advert_price")
         or exit_settings.get("trade_fallback_price")
-        or settings.get("wbac", {}).get("value")
     )
-    exit_source = exit_settings.get("source") or (
-        "WBAC" if exit_value == settings.get("wbac", {}).get("value") else "EXIT"
-    )
+    exit_source = exit_settings.get("source") or "EXIT"
+
+    if (exit_value is None or D(exit_value) <= 0) and comps_exit:
+        exit_value = (
+            comps_exit.get("underwritten_sale_price")
+            or comps_exit.get("quick_sale_price")
+            or comps_exit.get("advert_price")
+        )
+        if exit_value is not None and D(exit_value) > 0:
+            exit_source = "COMPARABLES"
+
+    if (exit_value is None or D(exit_value) <= 0) and settings.get("wbac", {}).get("value"):
+        exit_value = settings["wbac"]["value"]
+        exit_source = "WBAC"
     photos = sorted(
         path for path in (case / "photos").iterdir()
         if path.suffix.lower() in IMAGE_EXTENSIONS
@@ -1219,28 +1323,29 @@ def analyse(case, consent):
     quote_value = quote.get("value")
     if exit_value is None or D(exit_value) <= 0:
         missing.append(
-            "Exit value missing (set settings.exit.underwritten_sale_price "
-            "or provide settings.wbac.value)"
+            "Exit value missing (set settings.exit.* or add comparables/listings.json "
+            "so exit tiers can be derived; WBAC is optional fallback)"
         )
-    if quote_value is None or D(quote_value) <= 0:
-        notes.append("WBAC value missing (fallback not available)")
-    if not quote.get("cat_n_declared"):
-        notes.append("Cat N declaration not confirmed")
-    if not quote.get("repaired_condition_basis_confirmed"):
-        notes.append("WBAC repaired-condition exit basis unconfirmed")
-    if quote.get("evidence_file") and not local_evidence_file(case, quote["evidence_file"]):
-        notes.append("WBAC evidence file was referenced but not found")
 
-    reg = normalise_registration(inspection.vehicle.registration)
-    quote_reg = normalise_registration(quote.get("registration"))
-    if quote_reg and (not reg or reg != quote_reg):
-        notes.append("WBAC registration does not match verified lot identity")
-    if (
-        quote.get("mileage") is not None
-        and inspection.vehicle.mileage is not None
-        and quote["mileage"] != inspection.vehicle.mileage
-    ):
-        notes.append("WBAC mileage does not match listing mileage")
+    if quote_value is not None and D(quote_value) > 0:
+        if not quote.get("cat_n_declared"):
+            notes.append("Cat N declaration not confirmed (WBAC fallback)")
+        if not quote.get("repaired_condition_basis_confirmed"):
+            notes.append("WBAC repaired-condition exit basis unconfirmed")
+        if quote.get("evidence_file") and not local_evidence_file(case, quote["evidence_file"]):
+            notes.append("WBAC evidence file was referenced but not found")
+
+    if quote_value is not None and D(quote_value) > 0:
+        reg = normalise_registration(inspection.vehicle.registration)
+        quote_reg = normalise_registration(quote.get("registration"))
+        if quote_reg and (not reg or reg != quote_reg):
+            notes.append("WBAC registration does not match verified lot identity")
+        if (
+            quote.get("mileage") is not None
+            and inspection.vehicle.mileage is not None
+            and quote["mileage"] != inspection.vehicle.mileage
+        ):
+            notes.append("WBAC mileage does not match listing mileage")
 
     if not settings["labour_rate_confirmed"]:
         notes.append("Labour rate is an unconfirmed assumption")
@@ -1337,6 +1442,15 @@ def analyse(case, consent):
         "exit_deductions_gbp": float(D(settings["exit_costs_and_deductions"])),
         "net_exit_gbp": float(net_exit) if net_exit is not None else None,
         "comparables_exit": comps_exit,
+        "autotrader_listings": {
+            "present": bool(autotrader_payload),
+            "search_url": (autotrader_payload or {}).get("search", {}).get("url")
+            if isinstance(autotrader_payload, dict)
+            else None,
+            "result_count": (autotrader_payload or {}).get("result_count")
+            if isinstance(autotrader_payload, dict)
+            else None,
+        },
         "financial_scenarios": scenarios,
     }
     save_json(case / "report.json", report)
@@ -1372,11 +1486,33 @@ def analyse(case, consent):
                 + (fmt_gbp(limit, 0) if limit is not None else "No viable bid")
             )
     else:
-        lines.append("Not computed: missing exit value (WBAC).")
+        lines.append("Not computed: missing exit value.")
+
+    lines += ["", "## Comparables"]
+    if comps_exit and comps_exit.get("sample_size", 0):
+        lines.append(
+            f"- Sample size: {comps_exit.get('sample_size')} "
+            f"({comps_exit.get('evidence_kind')}), confidence {comps_exit.get('confidence')}"
+        )
+        lines.append(
+            f"- Tiers: advert {fmt_gbp(comps_exit.get('advert_price'))}, "
+            f"underwritten {fmt_gbp(comps_exit.get('underwritten_sale_price'))}, "
+            f"quick {fmt_gbp(comps_exit.get('quick_sale_price'))}"
+        )
+    else:
+        lines.append("- None")
+
+    if autotrader_payload:
+        lines.append(
+            f"- Auto Trader listings.json: {autotrader_payload.get('result_count')} results"
+        )
+        search_url = (autotrader_payload.get("search") or {}).get("url")
+        if search_url:
+            lines.append(f"- Auto Trader search: {search_url}")
 
     lines += ["", "## Profit / cost tiers (includes Copart fees + hammer VAT + delivery)"]
     if net_exit is None:
-        lines.append("- Not computed: missing `settings.wbac.value`.")
+        lines.append("- Not computed: missing exit value.")
     else:
         lines.append(f"- Exit value ({exit_source}): {fmt_gbp(exit_value)}")
         lines.append(
@@ -1445,6 +1581,50 @@ def analyse(case, consent):
 
     (case / "report.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"Saved {case / 'report.md'} and {case / 'report.json'}")
+
+
+def scrape_autotrader(
+    case: Path,
+    *,
+    cdp_url: str,
+    search_url: str,
+    limit: int | None = None,
+    import_comparables: bool = False,
+):
+    if not search_url.startswith("https://www.autotrader.co.uk/"):
+        raise ValueError("Provide an https://www.autotrader.co.uk/ search URL")
+
+    case.mkdir(parents=True, exist_ok=True)
+    (case / "photos").mkdir(exist_ok=True)
+
+    import autotrader as autotrader_module
+
+    payload = autotrader_module.run_search(
+        cdp_url=cdp_url,
+        search_url=search_url,
+        output_dir=case,
+        limit=limit,
+    )
+
+    settings_path = case / "settings.json"
+    if settings_path.exists():
+        settings = load_json(settings_path)
+    else:
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+
+    settings.setdefault("autotrader", {})
+    settings["autotrader"]["search_url"] = search_url
+    settings["autotrader"]["last_scraped_at"] = utc_now()
+    save_json(settings_path, settings)
+
+    if import_comparables:
+        current = load_comparables(case)
+        incoming = comparables_from_autotrader_payload(payload)
+        merged = merge_comparables(current, incoming)
+        save_comparables(case, merged)
+        return {"saved": True, "result_count": payload.get("result_count"), "imported": len(incoming)}
+
+    return {"saved": True, "result_count": payload.get("result_count"), "imported": 0}
 
 
 def main():
@@ -1517,6 +1697,26 @@ def main():
         help="CDP URL for an already-running browser (e.g. http://127.0.0.1:9222).",
     )
 
+    at_parser = commands.add_parser("autotrader-scrape")
+    at_parser.add_argument("--case", required=True)
+    at_parser.add_argument("--search-url", required=True)
+    at_parser.add_argument(
+        "--cdp",
+        default=None,
+        help="CDP URL for an already-running browser (e.g. http://127.0.0.1:9222).",
+    )
+    at_parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Limit number of adverts to scrape (0 = no limit).",
+    )
+    at_parser.add_argument(
+        "--import-comparables",
+        action="store_true",
+        help="Import scraped adverts into comparables.json (de-duped by URL).",
+    )
+
     args = parser.parse_args()
     case = Path(args.case)
 
@@ -1546,6 +1746,17 @@ def main():
         if args.cdp:
             os.environ["UNDERWRITER_CDP"] = args.cdp
         capture_wbac(case, args.url)
+    elif args.command == "autotrader-scrape":
+        cdp_url = args.cdp or os.getenv("UNDERWRITER_CDP") or "http://127.0.0.1:9222"
+        limit = None if int(args.limit) <= 0 else int(args.limit)
+        result = scrape_autotrader(
+            case,
+            cdp_url=cdp_url,
+            search_url=args.search_url,
+            limit=limit,
+            import_comparables=bool(args.import_comparables),
+        )
+        print(json.dumps(result, indent=2))
     else:
         analyse(case, args.consent_ai)
 

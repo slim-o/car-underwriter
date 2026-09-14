@@ -41,7 +41,7 @@ py -3 finance.py
 
 The UI lets you enter a lot number, edit `settings.json`, and run capture/WBAC/analyse from buttons.
 It also supports a simple manual "comparables" list to set exit prices (preferred over WBAC).
-It includes an "Auto Trader (offline)" importer that extracts listing URLs/prices from an HTML file you saved in your browser.
+It includes an "Auto Trader (CDP scrape)" action that saves `listings.json` into the case folder and can import results into `comparables.json`.
 
 Start Chrome with a CDP port (so the UI can reuse your logged-in session):
 
@@ -123,8 +123,24 @@ Open `cases/<LOTNUMBER>/settings.json` and set these from evidence (not guesses)
 - `photos_complete_confirmed`: set `true` only after you confirm completeness/relevance
 - `ulez`: `YES` / `NO` / `UNKNOWN`
 - `ulez_evidence`: what checker you used + timestamp
-- `wbac.*`: your evidenced WBAC "declared Cat N" exit value
-  - If you have a screenshot for audit, put it inside the case folder and set `wbac.evidence_file` to that filename (optional).
+- `exit.*` (preferred): your exit values (GBP)
+  - Either set these manually, or derive them from comparables/listings (below).
+- `wbac.*` (optional fallback): only if you still want to capture/record a WBAC value.
+
+### Auto Trader comparables (optional, recommended over WBAC)
+
+If you run the Auto Trader scrape from the UI, it saves:
+- `cases/<LOTNUMBER>/listings.json` (scraped adverts + prices)
+- `cases/<LOTNUMBER>/raw/` (raw HTML snapshots for audit/debug)
+
+During `analyse`, `listings.json` is treated as a comparables source and can be used to derive exit tiers automatically.
+This tool does not attempt to bypass CAPTCHAs or access controls; use it only where you are allowed to.
+
+CLI alternative (does the same scrape via CDP and saves into the case folder):
+
+```powershell
+python underwriter.py autotrader-scrape --case "cases/<LOTNUMBER>" --cdp http://127.0.0.1:9222 --search-url "<AUTOTRADER_SEARCH_URL>" --import-comparables
+```
 
 ### Optional: capture a WBAC valuation screenshot + extract the £ value
 

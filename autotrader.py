@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
@@ -25,7 +26,7 @@ LISTINGS_FILE = "listings.json"
 CHROME_URL = "http://localhost:9222"
 
 
-def get_search_page(context):
+def get_search_page(context, search_url: str):
     """
     Find an existing AutoTrader search page.
 
@@ -47,14 +48,14 @@ def get_search_page(context):
     page = context.new_page()
 
     page.goto(
-        SEARCH_URL,
+        search_url,
         wait_until="domcontentloaded"
     )
 
     return page
 
 
-def get_listings(page):
+def get_listings(page, *, debug_html_path: str | None = None):
     """
     Find advert cards on the AutoTrader search page.
     """
@@ -65,13 +66,8 @@ def get_listings(page):
 
     html = page.content()
 
-    # Save the search page HTML while we're debugging.
-    with open(
-        "search.html",
-        "w",
-        encoding="utf-8"
-    ) as file:
-        file.write(html)
+    if debug_html_path:
+        Path(debug_html_path).write_text(html, encoding="utf-8")
 
     soup = BeautifulSoup(
         html,
@@ -603,14 +599,19 @@ def scrape_listing(page, url, index):
     }
 
     return listing
-def save_results(results):
+def save_results(
+    results,
+    *,
+    search_url: str,
+    listings_file: str,
+):
     """
     Save search metadata and scraped listings.
     """
 
     data = {
         "search": {
-            "url": SEARCH_URL
+            "url": search_url
         },
 
         "scraped_at": datetime.now().isoformat(),
@@ -621,7 +622,7 @@ def save_results(results):
     }
 
     with open(
-        LISTINGS_FILE,
+        listings_file,
         "w",
         encoding="utf-8"
     ) as file:
@@ -636,48 +637,68 @@ def save_results(results):
     print()
     print(
         f"Saved {len(results)} listings "
-        f"to {LISTINGS_FILE}"
+        f"to {listings_file}"
     )
 
 
-def main():
+def run_search(
+    *,
+    cdp_url: str,
+    search_url: str,
+    output_dir: str | Path = ".",
+    limit: int | None = None,
+):
+    """
+    Scrape Auto Trader search results + individual adverts, saving:
+    - <output_dir>/listings.json
+    - <output_dir>/search.html (debug snapshot)
+    - <output_dir>/raw/listing_XXX.html
+
+    Note: this does not attempt to bypass access controls or CAPTCHAs.
+    """
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_dir = output_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    listings_file = str(output_dir / "listings.json")
+    debug_html_path = str(output_dir / "search.html")
 
     # Create raw directory if it doesn't exist.
     os.makedirs(
-        RAW_HTML_DIR,
+        str(raw_dir),
         exist_ok=True
     )
+
+    global RAW_HTML_DIR
+    RAW_HTML_DIR = str(raw_dir)
 
     with sync_playwright() as p:
 
         print(
             f"Connecting to Chromium at "
-            f"{CHROME_URL}"
+            f"{cdp_url}"
         )
 
         browser = p.chromium.connect_over_cdp(
-            CHROME_URL
+            cdp_url
         )
 
-        context = browser.contexts[0]
+        context = (
+            browser.contexts[0]
+            if browser.contexts
+            else browser.new_context()
+        )
 
-        print()
-        '''print("Current browser pages:")
-
-        for index, page in enumerate(
-            context.pages
-        ):
-
-            print(
-                f"[{index}] {page.url}"
-            )
-        '''
         # ---------------------------------------------
         # GET SEARCH PAGE
         # ---------------------------------------------
 
         search_page = get_search_page(
-            context
+            context,
+            search_url
         )
 
         print()
@@ -694,7 +715,8 @@ def main():
         # ---------------------------------------------
 
         listings = get_listings(
-            search_page
+            search_page,
+            debug_html_path=debug_html_path,
         )
 
         # ---------------------------------------------
@@ -704,6 +726,9 @@ def main():
         urls = get_listing_urls(
             listings
         )
+
+        if limit is not None:
+            urls = urls[: max(0, int(limit))]
 
         print()
         print(
@@ -726,7 +751,7 @@ def main():
             )
 
             print(
-                "search.html"
+                debug_html_path
             )
 
             print()
@@ -735,9 +760,13 @@ def main():
                 "the current AutoTrader structure."
             )
 
-            save_results([])
+            save_results(
+                [],
+                search_url=search_url,
+                listings_file=listings_file,
+            )
 
-            return
+            return json.loads(Path(listings_file).read_text(encoding="utf-8"))
 
         # ---------------------------------------------
         # CREATE LISTING PAGE
@@ -793,8 +822,22 @@ def main():
         # ---------------------------------------------
 
         save_results(
-            results
+            results,
+            search_url=search_url,
+            listings_file=listings_file,
         )
+
+    return json.loads(Path(listings_file).read_text(encoding="utf-8"))
+
+
+def main():
+
+    run_search(
+        cdp_url=CHROME_URL,
+        search_url=SEARCH_URL,
+        output_dir=".",
+        limit=None,
+    )
 
 
 if __name__ == "__main__":
