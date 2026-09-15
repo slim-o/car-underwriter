@@ -46,7 +46,12 @@ It includes an "Auto Trader (CDP scrape)" action that saves `listings.json` into
 Start Chrome with a CDP port (so the UI can reuse your logged-in session):
 
 ```powershell
-start chrome --remote-debugging-port=9222 --user-data-dir="%LOCALAPPDATA%\\Temp\\copart-debug-profile"
+$profile = "$env:LOCALAPPDATA\Temp\copart-debug-profile"
+
+Start-Process "chrome.exe" -ArgumentList @(
+    "--remote-debugging-port=9222"
+    "--user-data-dir=$profile"
+)
 ```
 
 Then run:
