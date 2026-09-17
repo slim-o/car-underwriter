@@ -103,7 +103,7 @@ def capture_listing_and_photos(case_dir: Path, cdp_url: str, url: str):
                 f"Open the lot page in Chrome first.\n\nExpected: {url}\n"
                 f"Current: {page.url}"
             )
-        underwriter.try_reveal_vrn(page)
+        vrn_evidence = underwriter.reveal_vrn_and_capture(page, case_dir)
         body_text = page.locator("body").inner_text(timeout=20000)
         if any(
             marker.lower() in body_text.lower()
@@ -126,6 +126,7 @@ def capture_listing_and_photos(case_dir: Path, cdp_url: str, url: str):
                 "captured_at": captured_at,
                 "capture_type": "ui_cdp",
                 "listing_parsed": underwriter.parse_copart_listing_text(body_text),
+                "vrn_evidence": vrn_evidence,
             }
         )
         underwriter.save_json(case_dir / "capture.json", capture_data)
@@ -238,9 +239,9 @@ with col_a:
         st.success(f"Opened: {opened}")
 
     st.caption(
-        "Before capturing: in the browser, click the masked VRN/VIN element to "
-        "reveal the registration (if available) and make sure the Photos gallery "
-        "is visible."
+        "Before capturing: make sure the Photos gallery is visible. "
+        "The tool will attempt to click the masked VRN link and save a VRN "
+        "screenshot for evidence, but you can also reveal it manually if needed."
     )
     ready = st.checkbox(
         "I revealed VRN (if possible) and the Photos gallery is visible",
@@ -408,7 +409,14 @@ tabs = st.tabs(
 
 with tabs[0]:
     report_path = case_dir / "report.md"
-    st.code(load_text(report_path) or "(no report.md yet)", language="markdown")
+    report_text = load_text(report_path) or ""
+    raw = st.checkbox("Show raw markdown", value=False)
+    if not report_text:
+        st.info("(no report.md yet)")
+    elif raw:
+        st.code(report_text, language="markdown")
+    else:
+        st.markdown(report_text, unsafe_allow_html=True)
 
 with tabs[1]:
     st.code(load_text(case_dir / "capture.json"), language="json")
@@ -542,18 +550,18 @@ with tabs[4]:
 
     if (not default_search_url) and suggested.get("make") and suggested.get("model"):
         year = suggested.get("year")
-        year_from = year - 1 if isinstance(year, int) else 2000
-        year_to = year + 1 if isinstance(year, int) else 2026
-        default_search_url = (
-            "https://www.autotrader.co.uk/car-search?channel=cars"
-            f"&make={suggested['make']}"
-            f"&model={suggested['model'].replace(' ', '%20')}"
-            "&only-writeoff-categories=on"
-            f"&postcode={postcode.replace(' ', '%20')}"
-            "&sort=relevance"
-            f"&year-from={year_from}"
-            f"&year-to={year_to}"
-        )
+        if isinstance(year, int):
+            default_search_url = autotrader.build_search_url(
+                make=suggested["make"],
+                model=suggested["model"],
+                postcode=postcode,
+                year=year,
+                keywords=suggested.get("variant"),
+                year_span=1,
+                only_writeoff_categories=True,
+                channel="cars",
+                sort="relevance",
+            )
 
     search_url = st.text_input("Auto Trader search URL", value=default_search_url)
     limit = st.number_input("Limit adverts (0 = no limit)", min_value=0, value=0, step=1)

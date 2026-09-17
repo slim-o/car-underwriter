@@ -2,7 +2,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, quote, urlparse, urlsplit, urlunsplit, parse_qsl
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
@@ -26,6 +26,51 @@ LISTINGS_FILE = "listings.json"
 CHROME_URL = "http://localhost:9222"
 
 
+def build_search_url(
+    *,
+    make: str,
+    model: str,
+    postcode: str,
+    year: int,
+    keywords: str | None = None,
+    year_span: int = 1,
+    only_writeoff_categories: bool = True,
+    channel: str = "cars",
+    sort: str = "relevance",
+) -> str:
+    """
+    Build an Auto Trader search URL.
+
+    Uses quote_via=quote so spaces become %20 (not '+') and brackets are encoded,
+    matching the URL style you typically get from the site.
+    """
+
+    year_from = max(1900, int(year) - int(year_span))
+    year_to = max(year_from, int(year) + int(year_span))
+
+    params: dict[str, str] = {
+        "channel": channel,
+        "make": make,
+        "model": model,
+        "postcode": postcode,
+        "sort": sort,
+        "year-from": str(year_from),
+        "year-to": str(year_to),
+    }
+
+    if keywords and str(keywords).strip():
+        params["keywords"] = str(keywords).strip()
+
+    if only_writeoff_categories:
+        params["only-writeoff-categories"] = "on"
+
+    return "https://www.autotrader.co.uk/car-search?" + urlencode(
+        params,
+        quote_via=quote,
+        safe="",
+    )
+
+
 def get_search_page(context, search_url: str):
     """
     Find an existing AutoTrader search page.
@@ -33,12 +78,32 @@ def get_search_page(context, search_url: str):
     If one doesn't exist, create a new page and open SEARCH_URL.
     """
 
+    # Prefer an existing tab that's already on this exact search (or a startswith
+    # match to tolerate anchors/query ordering differences).
+    for page in context.pages:
+        try:
+            if page.url == search_url or page.url.startswith(search_url):
+                print("Found matching AutoTrader search page:")
+                print(page.url)
+                return page
+        except Exception:
+            continue
+
     for page in context.pages:
 
         if "autotrader.co.uk/car-search" in page.url:
 
             print("Found existing AutoTrader search page:")
             print(page.url)
+
+            # Reuse the existing search tab, but navigate it to the requested query
+            # so we don't accidentally scrape a previous search.
+            try:
+                if page.url != search_url and not page.url.startswith(search_url):
+                    print("Navigating existing search tab to requested URL...")
+                    page.goto(search_url, wait_until="domcontentloaded")
+            except Exception:
+                pass
 
             return page
 
@@ -603,6 +668,7 @@ def save_results(
     results,
     *,
     search_url: str,
+    requested_search_url: str | None = None,
     listings_file: str,
 ):
     """
@@ -611,7 +677,8 @@ def save_results(
 
     data = {
         "search": {
-            "url": search_url
+            "url": search_url,
+            "requested_url": requested_search_url or search_url,
         },
 
         "scraped_at": datetime.now().isoformat(),
@@ -641,6 +708,24 @@ def save_results(
     )
 
 
+def strip_keywords_param(search_url: str) -> tuple[str, bool]:
+    """
+    Remove the `keywords` query parameter from an Auto Trader search URL.
+
+    Returns (url_without_keywords, removed_bool).
+    """
+
+    parts = urlsplit(search_url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    filtered = [(k, v) for (k, v) in query if k.lower() != "keywords"]
+    removed = len(filtered) != len(query)
+    if not removed:
+        return search_url, False
+
+    new_query = urlencode(filtered, quote_via=quote, safe="")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)), True
+
+
 def run_search(
     *,
     cdp_url: str,
@@ -665,6 +750,7 @@ def run_search(
 
     listings_file = str(output_dir / "listings.json")
     debug_html_path = str(output_dir / "search.html")
+    debug_html_with_keywords_path = str(output_dir / "search_with_keywords.html")
 
     # Create raw directory if it doesn't exist.
     os.makedirs(
@@ -714,18 +800,40 @@ def run_search(
         # FIND LISTINGS
         # ---------------------------------------------
 
-        listings = get_listings(
-            search_page,
-            debug_html_path=debug_html_path,
+        requested_search_url = search_url
+        used_search_url = search_url
+
+        def collect_urls(*, html_debug_path: str) -> list[str]:
+            nonlocal used_search_url
+            listings = get_listings(
+                search_page,
+                debug_html_path=html_debug_path,
+            )
+            urls = get_listing_urls(listings)
+            return urls
+
+        urls = collect_urls(
+            html_debug_path=(
+                debug_html_with_keywords_path
+                if "keywords=" in used_search_url
+                else debug_html_path
+            )
         )
 
-        # ---------------------------------------------
-        # GET URLS
-        # ---------------------------------------------
-
-        urls = get_listing_urls(
-            listings
-        )
+        # If keyword-narrowed searches return too few results, retry without keywords.
+        if len(urls) < 3:
+            fallback_url, removed = strip_keywords_param(used_search_url)
+            if removed and fallback_url != used_search_url:
+                print()
+                print(
+                    f"Only {len(urls)} results with keywords. Retrying without keywords..."
+                )
+                used_search_url = fallback_url
+                try:
+                    search_page.goto(used_search_url, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                urls = collect_urls(html_debug_path=debug_html_path)
 
         if limit is not None:
             urls = urls[: max(0, int(limit))]
@@ -762,7 +870,8 @@ def run_search(
 
             save_results(
                 [],
-                search_url=search_url,
+                search_url=used_search_url,
+                requested_search_url=requested_search_url,
                 listings_file=listings_file,
             )
 
@@ -823,7 +932,8 @@ def run_search(
 
         save_results(
             results,
-            search_url=search_url,
+            search_url=used_search_url,
+            requested_search_url=requested_search_url,
             listings_file=listings_file,
         )
 

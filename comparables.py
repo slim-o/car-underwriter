@@ -115,28 +115,39 @@ def compute_exit_tiers(
     sample_size = len(evidence_prices)
     confidence = "HIGH" if sample_size >= 10 else "MEDIUM" if sample_size >= 6 else "LOW"
 
-    advert_price = percentile(evidence_prices, 50)
-    underwritten = percentile(evidence_prices, 25)
-    quick = percentile(evidence_prices, 10)
+    p75 = percentile(evidence_prices, 75)
+    p50 = percentile(evidence_prices, 50)
+    p25 = percentile(evidence_prices, 25)
+    p10 = percentile(evidence_prices, 10)
 
     def discount(value: float | None, rate: float) -> float | None:
         if value is None:
             return None
         return round(float(value) * (1 - rate), 2)
 
+    worst_case = discount(
+        p10,
+        min(0.95, negotiation_discount + quick_sale_extra_discount),
+    )
+    base_case = discount(p50, negotiation_discount)
+    best_case = round(float(p75), 2) if p75 is not None else None
+
     return {
         "confidence": confidence,
         "evidence_kind": evidence_kind,
         "sample_size": sample_size,
-        "advert_price": round(float(advert_price), 2) if advert_price is not None else None,
-        "underwritten_sale_price": discount(underwritten, negotiation_discount),
-        "quick_sale_price": discount(
-            quick,
-            min(0.95, negotiation_discount + quick_sale_extra_discount),
-        ),
+        # Legacy keys (kept for compatibility)
+        "advert_price": round(float(p50), 2) if p50 is not None else None,
+        "underwritten_sale_price": discount(p25, negotiation_discount),
+        "quick_sale_price": worst_case,
+        # Preferred display keys
+        "best_case_price": best_case,
+        "base_case_price": base_case,
+        "worst_case_price": worst_case,
+        "evidence_price_min": round(float(min(evidence_prices)), 2),
+        "evidence_price_max": round(float(max(evidence_prices)), 2),
         "assumptions": {
             "negotiation_discount": negotiation_discount,
             "quick_sale_extra_discount": quick_sale_extra_discount,
         },
     }
-

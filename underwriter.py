@@ -227,7 +227,9 @@ def local_evidence_file(case, name):
 
 def try_reveal_vrn(page):
     try:
-        link = page.locator("vin-vrn-masking a").first
+        link = page.locator("vin-vrn-masking a.ng-star-inserted").first
+        if link.count() == 0:
+            link = page.locator("vin-vrn-masking a").first
         if link.count() == 0:
             return False
         if not link.is_visible():
@@ -237,6 +239,200 @@ def try_reveal_vrn(page):
         return True
     except Exception:
         return False
+
+
+def _extract_uk_reg_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    # Very loose pattern: a best-effort capture of UK-style registrations.
+    # (Newer format AA00AAA; older formats vary. We'll just collect plausible tokens.)
+    tokens = re.findall(r"\b[A-Z0-9]{5,8}\b", text.upper())
+    candidates = []
+    for token in tokens:
+        if "*" in token:
+            continue
+        if not re.search(r"\d", token):
+            continue
+        if token not in candidates:
+            candidates.append(token)
+    return candidates[:20]
+
+
+def reveal_vrn_and_capture(page, case: Path) -> dict:
+    """
+    Attempts to click the masked VRN link (vin-vrn-masking) so Copart reveals the
+    full VRN (often via a dialog), then saves a screenshot for evidence.
+
+    This does not bypass access controls; it only operates within the user's
+    authenticated browser session.
+    """
+
+    case.mkdir(parents=True, exist_ok=True)
+
+    def find_vrn_link():
+        anchors = page.locator("vin-vrn-masking a")
+        try:
+            count = anchors.count()
+        except Exception:
+            return anchors.first
+
+        best = None
+        best_score = -10_000
+
+        for i in range(min(count, 12)):
+            loc = anchors.nth(i)
+            try:
+                txt = (loc.inner_text(timeout=800) or "").strip()
+            except Exception:
+                continue
+
+            # Heuristic scoring:
+            # - Prefer masked values that contain digits (VRN like **62***)
+            # - De-prioritise long masked VIN strings (*****************)
+            score = 0
+            if "*" in txt:
+                score += 1
+            if re.search(r"\d", txt):
+                score += 10
+            # Prefer shorter (VRN) over longer (VIN).
+            score += max(0, 12 - len(txt))
+
+            if score > best_score:
+                best = loc
+                best_score = score
+
+        return best or anchors.first
+
+    def link_text() -> str:
+        try:
+            link = find_vrn_link()
+            return link.inner_text(timeout=1500).strip()
+        except Exception:
+            return ""
+
+    before = link_text()
+    clicked = False
+    dialog_visible = False
+    dialog_text = ""
+
+    click_attempts: list[str] = []
+
+    # Click the VRN itself (as requested), not the info icon.
+    try:
+        # Wait for the component to be present; on Copart this can hydrate after load.
+        try:
+            page.wait_for_selector("vin-vrn-masking", timeout=10000)
+        except Exception:
+            click_attempts.append("wait_component_timeout")
+
+        link = find_vrn_link()
+        if link.count() == 0:
+            click_attempts.append("no_link_found")
+        else:
+            try:
+                link.wait_for(state="visible", timeout=2500)
+            except Exception:
+                click_attempts.append("not_visible")
+
+            try:
+                link.scroll_into_view_if_needed(timeout=2500)
+            except Exception:
+                click_attempts.append("scroll_failed")
+
+            # Try a few click mechanisms; Copart sometimes has overlays/tooltip layers.
+            for mode in ("normal", "force", "dispatch", "js"):
+                if clicked:
+                    break
+                try:
+                    if mode == "normal":
+                        link.click(timeout=8000)
+                    elif mode == "force":
+                        link.click(timeout=3000, force=True)
+                    elif mode == "dispatch":
+                        link.dispatch_event("click")
+                    else:
+                        page.evaluate(
+                            """() => {
+  const anchors = Array.from(document.querySelectorAll('vin-vrn-masking a'));
+  anchors.sort((a,b) => (a.innerText||'').length - (b.innerText||'').length);
+  const el = anchors.find(a => /\\d/.test(a.innerText||'')) || anchors[0];
+  if (el) el.click();
+}"""
+                        )
+                    clicked = True
+                    click_attempts.append(f"clicked_{mode}")
+                except Exception as exc:
+                    click_attempts.append(f"failed_{mode}:{type(exc).__name__}")
+    except Exception as exc:
+        clicked = False
+        click_attempts.append(f"error:{type(exc).__name__}")
+
+    # Give the UI a moment to open any modal / reveal text.
+    page.wait_for_timeout(900)
+
+    after = link_text()
+
+    def read_visible_overlay() -> tuple[bool, str]:
+        try:
+            dialog = page.locator(
+                "p-dialog:visible, .cprt-dialog:visible, div[class*='cprt-dialog']:visible, "
+                "p-overlay:visible, .overlay-tooltip:visible, div[class*='overlay-tooltip']:visible"
+            ).first
+            if dialog.count() and dialog.is_visible():
+                try:
+                    return True, dialog.inner_text(timeout=1500).strip()
+                except Exception:
+                    return True, ""
+        except Exception:
+            return False, ""
+        return False, ""
+
+    dialog_visible, dialog_text = read_visible_overlay()
+
+    # If VRN is still masked and no overlay showed up, try the adjacent tooltip/info icon
+    # in the same "info-value" container.
+    info_clicked = False
+    if (not after or "*" in after) and not dialog_visible:
+        try:
+            container = link.locator("xpath=ancestor::span[contains(@class,'info-value')][1]")
+            info = container.locator(
+                "button[aria-label='VRN tooltip'], button[aria-label*='VRN'], button.info-icon, button.pi-info-circle"
+            ).first
+            if info.count() and info.is_visible():
+                try:
+                    info.scroll_into_view_if_needed(timeout=2500)
+                except Exception:
+                    pass
+                info.click(timeout=5000)
+                info_clicked = True
+                click_attempts.append("clicked_info_icon")
+                page.wait_for_timeout(700)
+                dialog_visible, dialog_text = read_visible_overlay()
+        except Exception as exc:
+            click_attempts.append(f"failed_info_icon:{type(exc).__name__}")
+
+    screenshot_name = None
+    if clicked or info_clicked:
+        screenshot_name = f"vrn_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        page.screenshot(path=str(case / screenshot_name), full_page=True)
+
+    candidates = _extract_uk_reg_candidates(dialog_text) if dialog_text else []
+    # If the on-page link becomes unmasked, prefer that.
+    unmasked = None
+    if after and "*" not in after:
+        unmasked = normalise_registration(after)
+
+    return {
+        "clicked": clicked,
+        "click_attempts": click_attempts,
+        "before_text": before or None,
+        "after_text": after or None,
+        "dialog_visible": dialog_visible,
+        "dialog_text_excerpt": (dialog_text[:600] if dialog_text else None),
+        "vrn_candidates": candidates,
+        "vrn_revealed": unmasked,
+        "evidence_screenshot": screenshot_name,
+    }
 
 
 def load_autotrader_payload(case: Path) -> dict | None:
@@ -389,7 +585,6 @@ def collect_thumbnail_urls(page, max_rounds=40):
 
 
 def download_gallery_images(page, case):
-    try_reveal_vrn(page)
     thumbnails = collect_thumbnail_urls(page)
     if not thumbnails:
         manifest = {
@@ -642,7 +837,7 @@ def capture(url, case):
                 if current_host not in {"copart.co.uk", "www.copart.co.uk"}:
                     raise ValueError("Browser is no longer on Copart UK")
 
-                try_reveal_vrn(page)
+                vrn_evidence = reveal_vrn_and_capture(page, case)
                 text = page.locator("body").inner_text(timeout=20000)
                 if any(marker.lower() in text.lower() for marker in IMPERVA_MARKERS):
                     print(
@@ -669,6 +864,7 @@ def capture(url, case):
                     "lot_number": re.search(r"/lot/(\d+)", parsed.path).group(1),
                     "capture_type": "supervised_browser",
                     "automatic_gallery_collection": False,
+                    "vrn_evidence": vrn_evidence,
                 })
 
                 print(
@@ -821,6 +1017,17 @@ def collect_photos(url, case):
                     )
                     continue
                 break
+
+            # Attempt VRN reveal first (before any photo/gallery interactions).
+            try:
+                vrn_evidence = reveal_vrn_and_capture(page, case)
+                capture_path = case / "capture.json"
+                if capture_path.exists():
+                    capture_data = load_json(capture_path)
+                    capture_data.setdefault("vrn_evidence", vrn_evidence)
+                    save_json(capture_path, capture_data)
+            except Exception:
+                pass
 
             print("\nCollecting gallery images into the photos folder...")
             gallery = download_gallery_images(page, case)
@@ -1251,6 +1458,7 @@ def analyse(case, consent):
 
     print(f"Assessing {len(photos)} photographs...")
     inspection = inspect(case, capture_data, photos)
+    bid = inspection.vehicle.current_bid
 
     if (
         inspection.vehicle.lot_number
@@ -1389,6 +1597,92 @@ def analyse(case, consent):
                 result["at_ceiling"] = performance(net_exit, total)
             scenarios[scenario] = result
 
+    # Exit × repair matrix (bid ceilings) to avoid presenting derived hammer ceilings
+    # as though they were three "outcomes".
+    exit_tiers = {}
+    if comps_exit:
+        exit_tiers["Optimistic"] = comps_exit.get("best_case_price") or comps_exit.get("advert_price")
+        exit_tiers["Base"] = comps_exit.get("base_case_price") or comps_exit.get("underwritten_sale_price") or comps_exit.get("advert_price")
+        exit_tiers["Adverse"] = comps_exit.get("worst_case_price") or comps_exit.get("quick_sale_price")
+    # Allow manual overrides via settings.exit.*
+    exit_tiers["Optimistic"] = exit_settings.get("advert_price") or exit_tiers.get("Optimistic")
+    exit_tiers["Base"] = exit_settings.get("underwritten_sale_price") or exit_tiers.get("Base")
+    exit_tiers["Adverse"] = exit_settings.get("quick_sale_price") or exit_settings.get("trade_fallback_price") or exit_tiers.get("Adverse") or settings.get("wbac", {}).get("value")
+    exit_tiers = {
+        k: float(D(v))
+        for k, v in exit_tiers.items()
+        if v is not None and D(v) > 0
+    }
+
+    repair_tiers = {
+        "Optimistic": float(D(repairs["low"])),
+        "Base": float(D(repairs["base"])),
+        "Adverse": float(D(repairs["adverse"])),
+    }
+
+    exit_repair_matrix = None
+    if exit_tiers:
+        exit_repair_matrix = {
+            "exit_tiers_gbp": exit_tiers,
+            "repair_tiers_gbp": repair_tiers,
+            "cells": {},
+        }
+
+        for exit_label, exit_amount in exit_tiers.items():
+            net_exit_cell = D(exit_amount) - D(settings["exit_costs_and_deductions"])
+            row = {}
+            if net_exit_cell <= 0:
+                for repair_label in repair_tiers:
+                    row[repair_label] = {"status": "INVALID_EXIT"}
+                exit_repair_matrix["cells"][exit_label] = row
+                continue
+
+            for repair_label, repair_amount in repair_tiers.items():
+                fixed = (
+                    D(repair_amount)
+                    + D(settings["transport_including_vat"])
+                    + D(settings["other_acquisition_costs"])
+                )
+                result = ceiling(
+                    net_exit=net_exit_cell,
+                    fixed_costs=fixed,
+                    capital_limit=settings["capital_limit"],
+                    target_roi=settings["target_roi"],
+                    rounding_step=settings["bid_rounding_step"],
+                    method=settings["bidding_method"],
+                    hammer_vat_rate=settings["hammer_vat_rate"],
+                    fee_vat_rate=settings["fee_vat_rate"],
+                )
+                limit = result["provisional_hammer_ceiling"]
+                if limit is None:
+                    row[repair_label] = {"status": "NO_VIABLE_BID", "details": result}
+                    continue
+
+                total = investment(
+                    limit,
+                    fixed,
+                    settings["bidding_method"],
+                    settings["hammer_vat_rate"],
+                    settings["fee_vat_rate"],
+                )
+                perf = performance(net_exit_cell, total)
+                headroom = None
+                if bid is not None:
+                    headroom = float(D(limit) - D(bid))
+                    # You can't bid below the current bid; treat negative headroom as "not viable".
+                    if headroom < 0:
+                        headroom = 0.0
+
+                row[repair_label] = {
+                    "status": "OK" if (bid is None or D(limit) >= D(bid)) else "BELOW_CURRENT_BID",
+                    "max_hammer_gbp": float(D(limit)),
+                    "total_invest_gbp": float(D(total)),
+                    "profit_gbp": float(D(perf["profit"])),
+                    "roi_percent": perf["roi_percent"],
+                    "headroom_vs_captured_bid_gbp": headroom,
+                }
+            exit_repair_matrix["cells"][exit_label] = row
+
     decision_base = "INVESTIGATE"
     if inspection.vehicle.category in {"S", "B", "U", "X"}:
         decision_base = "PASS"
@@ -1400,7 +1694,6 @@ def analyse(case, consent):
     age_minutes = (
         datetime.now(timezone.utc) - captured_at
     ).total_seconds() / 60
-    bid = inspection.vehicle.current_bid
     if (
         scenarios
         and bid is not None
@@ -1451,6 +1744,9 @@ def analyse(case, consent):
             if isinstance(autotrader_payload, dict)
             else None,
         },
+        "exit_tiers_gbp": exit_tiers,
+        "repair_tiers_gbp": repair_tiers,
+        "exit_repair_matrix": exit_repair_matrix,
         "financial_scenarios": scenarios,
     }
     save_json(case / "report.json", report)
@@ -1464,41 +1760,172 @@ def analyse(case, consent):
         f"Decision if ULEZ is YES: **{decision_assuming_ulez_yes}**",
         f"Decision if ULEZ is NO: **{decision_assuming_ulez_no}**",
         "",
-        "## Repair scenarios, including contingency",
+        "## Repair cost tiers (optimistic / base / adverse)",
     ]
-    for name, amount in repairs.items():
-        lines.append(f"- {name.title()}: {fmt_gbp(amount)}")
+    lines.append("Optimistic = cheaper, Base = likely, Adverse = worst-case (most expensive).")
+    lines.append(f"- Optimistic: {fmt_gbp(repairs['low'])}")
+    lines.append(f"- Base: {fmt_gbp(repairs['base'])}")
+    lines.append(f"- Adverse: {fmt_gbp(repairs['adverse'])}")
 
     lines += ["", "## Findings"]
-    for finding in inspection.findings:
-        lines.append(
-            f"- [{finding.certainty}] {finding.component}: "
-            f"{finding.observation} "
-            f"(photos: {', '.join(finding.photo_files) or 'none'})"
+    budget_text = [
+        (line, f"{line.category} {line.description} {line.basis}".lower())
+        for line in budget.lines
+    ]
+
+    def related_cost_lines(finding_text: str, top_n: int = 3):
+        tokens = [
+            t
+            for t in re.findall(r"[a-z0-9]{3,}", (finding_text or "").lower())
+            if t
+            and t
+            not in {
+                "with", "and", "for", "the", "from", "into", "near",
+                "left", "right", "rear", "front",
+            }
+        ]
+        scored = []
+        for bl, hay in budget_text:
+            score = sum(1 for t in set(tokens) if t in hay)
+            if score > 0:
+                scored.append((score, bl))
+        scored.sort(key=lambda x: (-x[0], x[1].adverse - x[1].low))
+        return [bl for _, bl in scored[:top_n]]
+
+    lines.append("")
+    lines.append("| Finding | Evidence | Repair required? | Optimistic | Base | Adverse |")
+    lines.append("|---|---|---|---:|---:|---:|")
+
+    def repair_required(component: str, observation: str, certainty: str) -> str:
+        text = f"{component} {observation}".lower()
+
+        required_terms = (
+            "airbag", "srs", "abs", "warning", "engine", "gearbox", "transmission",
+            "leak", "coolant", "oil", "smoke", "overheat", "broken", "cracked",
+            "structural", "chassis", "rail", "subframe", "suspension", "steering",
+            "brake", "belt", "timing", "clutch", "misfire", "no start",
+        )
+        cosmetic_terms = (
+            "minor", "light", "scratch", "scratches", "scuff", "scuffs", "dent",
+            "dents", "stone chip", "chips", "cosmetic", "paint", "trim", "curb rash",
         )
 
-    lines += ["", "## Maximum hammer scenarios"]
+        if any(term in text for term in required_terms):
+            return "Yes"
+
+        if certainty == "VISIBLE" and any(term in text for term in cosmetic_terms):
+            return "Optional"
+
+        if certainty == "VISIBLE":
+            return "Possible"
+
+        if certainty == "SUSPECTED":
+            return "Possible"
+
+        return "Unknown"
+
+    def fmt_cell(value: float) -> str:
+        return fmt_gbp(value) if value and D(value) > 0 else "£0"
+
+    totals = {"opt": D(0), "base": D(0), "adverse": D(0)}
+
+    for finding in inspection.findings:
+        finding_text = f"{finding.component} {finding.observation}"
+        related = related_cost_lines(finding_text)
+
+        # NOTE: This is a heuristic attribution of budget lines to findings.
+        # Lines are not additive per finding (avoid double counting).
+        opt = sum((D(bl.low) for bl in related), D(0))
+        base = sum((D(bl.base) for bl in related), D(0))
+        adverse = sum((D(bl.adverse) for bl in related), D(0))
+
+        totals["opt"] += opt
+        totals["base"] += base
+        totals["adverse"] += adverse
+
+        evidence = (
+            f"[{finding.certainty}] {finding.observation} "
+            f"(photos: {', '.join(finding.photo_files) or 'none'})"
+        )
+        lines.append(
+            f"| {finding.component} | {evidence} | {repair_required(finding.component, finding.observation, finding.certainty)} | "
+            f"{fmt_cell(float(opt))} | {fmt_cell(float(base))} | {fmt_cell(float(adverse))} |"
+        )
+
+    lines.append(
+        f"| **Total (heuristic)** |  |  | "
+        f"**{fmt_cell(float(totals['opt']))}** | **{fmt_cell(float(totals['base']))}** | **{fmt_cell(float(totals['adverse']))}** |"
+    )
+    lines.append(
+        "_Totals above are heuristic and may double-count shared budget lines; use the Repair cost tiers as the source of truth for scenario totals._"
+    )
+
+    lines += ["", "## Bid ceilings (derived, ROI-targeting)"]
+    lines.append(
+        "These are *derived maximum hammer bids* that target the ROI, not three outcomes. "
+        "They can look non-monotonic due to Copart fee bands and bid rounding."
+    )
+    if bid is not None:
+        lines.append(f"- Captured bid (not live): {fmt_gbp(bid, 0)}")
     if scenarios:
-        for name, result in scenarios.items():
-            limit = result["provisional_hammer_ceiling"]
-            lines.append(
-                f"- {name.title()}: "
-                + (fmt_gbp(limit, 0) if limit is not None else "No viable bid")
-            )
+        label_map = {"low": "Optimistic", "base": "Base", "adverse": "Adverse"}
+        for key in ("low", "base", "adverse"):
+            limit = scenarios.get(key, {}).get("provisional_hammer_ceiling")
+            if limit is None:
+                lines.append(f"- {label_map[key]} (chosen exit): No viable bid")
+                continue
+            if bid is not None and D(limit) < D(bid):
+                lines.append(
+                    f"- {label_map[key]} (chosen exit): ceiling {fmt_gbp(limit, 0)} "
+                    f"is below captured bid {fmt_gbp(bid, 0)} → **not viable**"
+                )
+            else:
+                headroom = D(limit) - D(bid) if bid is not None else None
+                headroom_str = fmt_gbp(headroom, 0) if headroom is not None else "n/a"
+                lines.append(
+                    f"- {label_map[key]} (chosen exit): max hammer {fmt_gbp(limit, 0)} "
+                    f"(headroom vs bid {headroom_str})"
+                )
     else:
         lines.append("Not computed: missing exit value.")
 
-    lines += ["", "## Comparables"]
+    if exit_repair_matrix:
+        cells = exit_repair_matrix.get("cells") or {}
+
+        def _cell(exit_label: str, repair_label: str) -> dict | None:
+            return (cells.get(exit_label) or {}).get(repair_label)
+
+        def _summary(label: str, cell: dict | None) -> str:
+            if not cell or cell.get("status") != "OK":
+                return f"- {label}: no viable bid"
+            headroom = cell.get("headroom_vs_captured_bid_gbp")
+            headroom_str = fmt_gbp(headroom, 0) if isinstance(headroom, (int, float)) else "n/a"
+            return f"- {label}: {fmt_gbp(cell.get('max_hammer_gbp'), 0)} (headroom vs bid {headroom_str})"
+
+        lines.append("")
+        lines.append("Across exit and repair ranges (from matrix):")
+        lines.append(_summary("Conservative (Adverse exit × Adverse repairs)", _cell("Adverse", "Adverse")))
+        lines.append(_summary("Base (Base exit × Base repairs)", _cell("Base", "Base")))
+        lines.append(_summary("Stretch (Optimistic exit × Optimistic repairs)", _cell("Optimistic", "Optimistic")))
+
+    lines += ["", "## Comparables (exit tiers)"]
     if comps_exit and comps_exit.get("sample_size", 0):
         lines.append(
-            f"- Sample size: {comps_exit.get('sample_size')} "
-            f"({comps_exit.get('evidence_kind')}), confidence {comps_exit.get('confidence')}"
+            f"Analysed {comps_exit.get('sample_size')} comparables "
+            f"({comps_exit.get('evidence_kind')}), confidence {comps_exit.get('confidence')}."
         )
-        lines.append(
-            f"- Tiers: advert {fmt_gbp(comps_exit.get('advert_price'))}, "
-            f"underwritten {fmt_gbp(comps_exit.get('underwritten_sale_price'))}, "
-            f"quick {fmt_gbp(comps_exit.get('quick_sale_price'))}"
-        )
+        if comps_exit.get("evidence_price_min") is not None:
+            lines.append(
+                f"Evidence range: {fmt_gbp(comps_exit.get('evidence_price_min'))}"
+                f"–{fmt_gbp(comps_exit.get('evidence_price_max'))}."
+            )
+    if exit_tiers:
+        lines.append("")
+        lines.append("| Tier | Exit price (GBP) | Meaning |")
+        lines.append("|---|---:|---|")
+        lines.append(f"| Optimistic | {fmt_gbp(exit_tiers.get('Optimistic'))} | Highest plausible exit |")
+        lines.append(f"| Base | {fmt_gbp(exit_tiers.get('Base'))} | Most likely exit |")
+        lines.append(f"| Adverse | {fmt_gbp(exit_tiers.get('Adverse'))} | Lowest plausible exit |")
     else:
         lines.append("- None")
 
@@ -1510,60 +1937,78 @@ def analyse(case, consent):
         if search_url:
             lines.append(f"- Auto Trader search: {search_url}")
 
-    lines += ["", "## Profit / cost tiers (includes Copart fees + hammer VAT + delivery)"]
-    if net_exit is None:
-        lines.append("- Not computed: missing exit value.")
+    lines += ["", "## Profit matrix (3 exit tiers × 3 repair tiers)"]
+    lines.append(
+        "Tables below show profits/ROI at the **derived max hammer** for each cell, "
+        "including Copart fees, hammer VAT (if applicable), delivery, and other acquisition costs."
+    )
+    if not exit_repair_matrix:
+        lines.append("- Not computed: missing exit tiers.")
     else:
-        lines.append(f"- Exit value ({exit_source}): {fmt_gbp(exit_value)}")
-        lines.append(
-            f"- Exit deductions: {fmt_gbp(settings['exit_costs_and_deductions'])}"
-        )
-        lines.append(f"- Net exit: {fmt_gbp(net_exit)}")
+        cells = exit_repair_matrix.get("cells") or {}
 
-        if bid is not None:
-            lines.append(f"- Captured bid (not live): {fmt_gbp(bid, 0)}")
+        def get_cell(exit_label: str, repair_label: str) -> dict | None:
+            return (cells.get(exit_label) or {}).get(repair_label)
 
-        for scenario_name in ("low", "base", "adverse"):
-            repair_total = repairs[scenario_name]
-            fixed = (
-                D(repair_total)
-                + D(settings["transport_including_vat"])
-                + D(settings["other_acquisition_costs"])
-            )
-            limit = scenarios.get(scenario_name, {}).get("provisional_hammer_ceiling")
-            if limit is None:
-                lines.append(f"- {scenario_name.title()}: no viable bid")
+        for exit_label in ("Adverse", "Base", "Optimistic"):
+            exit_amount = (exit_repair_matrix.get("exit_tiers_gbp") or {}).get(exit_label)
+            if not exit_amount:
                 continue
 
-            fee = copart_fees(
-                limit,
-                method=settings["bidding_method"],
-                vat_rate=str(settings["fee_vat_rate"]),
-            )
-            hammer_vat = D(limit) * D(settings["hammer_vat_rate"])
-            total = investment(
-                limit,
-                fixed,
-                settings["bidding_method"],
-                settings["hammer_vat_rate"],
-                settings["fee_vat_rate"],
-            )
-            perf = performance(net_exit, total)
+            lines.append("")
+            lines.append(f"### Exit tier: {exit_label} ({fmt_gbp(exit_amount)})")
 
-            roi = perf["roi_percent"]
-            roi_str = f"{roi:.1f}%" if roi is not None else "n/a"
-            lines.append(
-                f"- {scenario_name.title()}: max hammer {fmt_gbp(limit, 0)}, "
-                f"total invest {fmt_gbp(total)}, profit {fmt_gbp(perf['profit'])}, "
-                f"ROI {roi_str}"
-            )
-            lines.append(
-                f"  (repairs {fmt_gbp(repair_total)}, "
-                f"delivery {fmt_gbp(settings['transport_including_vat'])}, "
-                f"other acq {fmt_gbp(settings['other_acquisition_costs'])}, "
-                f"hammer VAT {fmt_gbp(hammer_vat)}, "
-                f"Copart fees {fmt_gbp(fee)})"
-            )
+            if bid is None:
+                lines.append("| Repair tier | Max hammer | Total invest | Profit | ROI |")
+                lines.append("|---|---:|---:|---:|---:|")
+            else:
+                lines.append("| Repair tier | Max hammer | Profit @ max | ROI @ max | Headroom vs bid | Profit @ bid | ROI @ bid |")
+                lines.append("|---|---:|---:|---:|---:|---:|---:|")
+
+            for repair_label in ("Optimistic", "Base", "Adverse"):
+                cell = get_cell(exit_label, repair_label) or {}
+                if cell.get("status") != "OK":
+                    if bid is None:
+                        lines.append(f"| {repair_label} | No viable bid |  |  |  |")
+                    else:
+                        lines.append(f"| {repair_label} | No viable bid |  |  |  |  |  |")
+                    continue
+
+                roi = cell.get("roi_percent")
+                roi_str = f"{roi:.1f}%" if isinstance(roi, (int, float)) else "n/a"
+
+                if bid is None:
+                    lines.append(
+                        f"| {repair_label} | {fmt_gbp(cell.get('max_hammer_gbp'), 0)} | "
+                        f"{fmt_gbp(cell.get('total_invest_gbp'))} | {fmt_gbp(cell.get('profit_gbp'))} | {roi_str} |"
+                    )
+                    continue
+
+                headroom = cell.get("headroom_vs_captured_bid_gbp")
+                headroom_str = fmt_gbp(headroom, 0) if isinstance(headroom, (int, float)) else "n/a"
+
+                fixed = (
+                    D(repair_tiers[repair_label])
+                    + D(settings["transport_including_vat"])
+                    + D(settings["other_acquisition_costs"])
+                )
+                net_exit_cell = D(exit_amount) - D(settings["exit_costs_and_deductions"])
+                total_at_bid = investment(
+                    D(bid),
+                    fixed,
+                    settings["bidding_method"],
+                    settings["hammer_vat_rate"],
+                    settings["fee_vat_rate"],
+                )
+                perf_at_bid = performance(net_exit_cell, total_at_bid)
+                roi_bid = perf_at_bid.get("roi_percent")
+                roi_bid_str = f"{roi_bid:.1f}%" if isinstance(roi_bid, (int, float)) else "n/a"
+
+                lines.append(
+                    f"| {repair_label} | {fmt_gbp(cell.get('max_hammer_gbp'), 0)} | "
+                    f"{fmt_gbp(cell.get('profit_gbp'))} | {roi_str} | {headroom_str} | "
+                    f"{fmt_gbp(perf_at_bid.get('profit'))} | {roi_bid_str} |"
+                )
 
     lines += ["", "## Assumptions for scenarios"]
     if assumptions:
