@@ -1495,6 +1495,39 @@ def analyse(case, consent):
         for scenario in ("low", "base", "adverse")
     }
 
+    def budget_sum(
+        tier: str,
+        *,
+        categories: set[str] | None = None,
+        require_ebay_candidates: bool | None = None,
+    ) -> D:
+        total = D(0)
+        for line in budget.lines:
+            if categories is not None and line.category not in categories:
+                continue
+            has_candidates = bool(line.candidate_item_ids)
+            if require_ebay_candidates is True and not has_candidates:
+                continue
+            if require_ebay_candidates is False and has_candidates:
+                continue
+            total += D(getattr(line, tier))
+        return total
+
+    budget_breakdown = {
+        tier: {
+            "parts_ebay": float(budget_sum(tier, categories={"PARTS"}, require_ebay_candidates=True)),
+            "parts_other": float(budget_sum(tier, categories={"PARTS"}, require_ebay_candidates=False)),
+            "labour": float(budget_sum(tier, categories={"LABOUR"})),
+            "paint": float(budget_sum(tier, categories={"PAINT"})),
+            "mechanical": float(budget_sum(tier, categories={"MECHANICAL"})),
+            "diagnostics": float(budget_sum(tier, categories={"DIAGNOSTICS"})),
+            "mot": float(budget_sum(tier, categories={"MOT"})),
+            "valet": float(budget_sum(tier, categories={"VALET"})),
+            "other": float(budget_sum(tier, categories={"OTHER"})),
+        }
+        for tier in ("low", "base", "adverse")
+    }
+
     missing = []
     assumptions = []
     notes = [
@@ -1722,6 +1755,7 @@ def analyse(case, consent):
         "settings": settings,
         "parts_research": parts,
         "budget": budget.model_dump(),
+        "budget_breakdown": budget_breakdown,
         "contingency": float(contingency),
         "repairs_including_contingency": {
             name: float(value) for name, value in repairs.items()
@@ -1763,9 +1797,31 @@ def analyse(case, consent):
         "## Repair cost tiers (optimistic / base / adverse)",
     ]
     lines.append("Optimistic = cheaper, Base = likely, Adverse = worst-case (most expensive).")
-    lines.append(f"- Optimistic: {fmt_gbp(repairs['low'])}")
-    lines.append(f"- Base: {fmt_gbp(repairs['base'])}")
-    lines.append(f"- Adverse: {fmt_gbp(repairs['adverse'])}")
+    lines.append("")
+    lines.append("| Tier | Total (incl contingency) | Parts (eBay-backed) | Parts (other) | Labour/paint/other | Contingency |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+
+    def tier_row(label: str, tier: str) -> str:
+        b = budget_breakdown[tier]
+        non_parts = (
+            D(b["labour"])
+            + D(b["paint"])
+            + D(b["mechanical"])
+            + D(b["diagnostics"])
+            + D(b["mot"])
+            + D(b["valet"])
+            + D(b["other"])
+        )
+        parts_ebay = D(b["parts_ebay"])
+        parts_other = D(b["parts_other"])
+        return (
+            f"| {label} | {fmt_gbp(repairs[tier])} | {fmt_gbp(parts_ebay)} | {fmt_gbp(parts_other)} | "
+            f"{fmt_gbp(non_parts)} | {fmt_gbp(contingency)} |"
+        )
+
+    lines.append(tier_row("Optimistic", "low"))
+    lines.append(tier_row("Base", "base"))
+    lines.append(tier_row("Adverse", "adverse"))
 
     lines += ["", "## Findings"]
     budget_text = [
@@ -1793,7 +1849,12 @@ def analyse(case, consent):
         return [bl for _, bl in scored[:top_n]]
 
     lines.append("")
-    lines.append("| Finding | Evidence | Repair required? | Optimistic | Base | Adverse |")
+    lines.append(
+        "_Costs below are **parts-only** heuristics (eBay-backed PARTS lines) to help you "
+        "see what is coming from parts research vs the model’s labour/paint allowances._"
+    )
+    lines.append("")
+    lines.append("| Finding | Evidence | Repair required? | Parts (Optimistic) | Parts (Base) | Parts (Adverse) |")
     lines.append("|---|---|---|---:|---:|---:|")
 
     def repair_required(component: str, observation: str, certainty: str) -> str:
@@ -1831,7 +1892,11 @@ def analyse(case, consent):
 
     for finding in inspection.findings:
         finding_text = f"{finding.component} {finding.observation}"
-        related = related_cost_lines(finding_text)
+        related = [
+            bl
+            for bl in related_cost_lines(finding_text)
+            if bl.category == "PARTS" and bl.candidate_item_ids
+        ]
 
         # NOTE: This is a heuristic attribution of budget lines to findings.
         # Lines are not additive per finding (avoid double counting).
@@ -1843,10 +1908,7 @@ def analyse(case, consent):
         totals["base"] += base
         totals["adverse"] += adverse
 
-        evidence = (
-            f"[{finding.certainty}] {finding.observation} "
-            f"(photos: {', '.join(finding.photo_files) or 'none'})"
-        )
+        evidence = f"[{finding.certainty}] {finding.observation} (photos: {', '.join(finding.photo_files) or 'none'})"
         lines.append(
             f"| {finding.component} | {evidence} | {repair_required(finding.component, finding.observation, finding.certainty)} | "
             f"{fmt_cell(float(opt))} | {fmt_cell(float(base))} | {fmt_cell(float(adverse))} |"
@@ -1859,6 +1921,30 @@ def analyse(case, consent):
     lines.append(
         "_Totals above are heuristic and may double-count shared budget lines; use the Repair cost tiers as the source of truth for scenario totals._"
     )
+
+    lines += ["", "## Labour / paint / other allowances (not eBay-derived)"]
+    lines.append(
+        "These are the non-parts allowances generated by the model (labour, paint, diagnostics, etc)."
+    )
+    lines.append("")
+    lines.append("| Tier | Labour/paint/other |")
+    lines.append("|---|---:|")
+
+    def non_parts_total(tier: str) -> D:
+        b = budget_breakdown[tier]
+        return (
+            D(b["labour"])
+            + D(b["paint"])
+            + D(b["mechanical"])
+            + D(b["diagnostics"])
+            + D(b["mot"])
+            + D(b["valet"])
+            + D(b["other"])
+        )
+
+    lines.append(f"| Optimistic | {fmt_gbp(non_parts_total('low'))} |")
+    lines.append(f"| Base | {fmt_gbp(non_parts_total('base'))} |")
+    lines.append(f"| Adverse | {fmt_gbp(non_parts_total('adverse'))} |")
 
     lines += ["", "## Bid ceilings (derived, ROI-targeting)"]
     lines.append(
